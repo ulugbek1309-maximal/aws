@@ -337,7 +337,7 @@ def main():
     # Redirect persistence to temp files.
     tmp = tempfile.mkdtemp()
     import importlib
-    mod = importlib.import_module("aws_telegram_manager")
+    mod = importlib.import_module("my_aws_server")
     mod.PROFILE_FILE = os.path.join(tmp, "profiles.json")
     mod.SETTINGS_FILE = os.path.join(tmp, "settings.json")
 
