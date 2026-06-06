@@ -595,7 +595,7 @@ class AwsTelegramManager:
         ttk.Button(tb, text=self._t("new_file"), command=self._new_file).pack(side=tk.LEFT, padx=2)
         ttk.Button(tb, text=self._t("new_folder"), command=self._new_folder).pack(side=tk.LEFT, padx=2)
         ttk.Button(tb, text=self._t("delete"), command=self._delete_selected).pack(side=tk.LEFT, padx=2)
-        self.sudo_var = tk.BooleanVar(value=False)
+        self.sudo_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(tb, text="sudo", variable=self.sudo_var).pack(side=tk.LEFT, padx=6)
         ttk.Button(tb, text="Open", command=self._open_selected).pack(side=tk.LEFT, padx=2)
 
