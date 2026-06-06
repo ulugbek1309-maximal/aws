@@ -1396,13 +1396,24 @@ class AwsTelegramManager:
         messagebox.showerror("Connection failed", message)
 
     def _load_private_key(self, key_path: str, passphrase: str | None = None):
+        # Build the candidate list dynamically: some key classes (e.g. DSSKey
+        # for deprecated DSA keys) were removed in newer paramiko releases, so
+        # referencing them directly would raise AttributeError.
+        candidates = []
+        for name in ("RSAKey", "Ed25519Key", "ECDSAKey", "DSSKey"):
+            cls = getattr(paramiko, name, None)
+            if cls is not None:
+                candidates.append(cls)
         last = None
-        for cls in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.DSSKey):
+        for cls in candidates:
             try:
                 return cls.from_private_key_file(key_path, password=passphrase)
+            except paramiko.PasswordRequiredException as exc:
+                # Wrong/missing passphrase: stop early with a clear message.
+                raise exc
             except Exception as exc:  # noqa: BLE001
                 last = exc
-        raise last if last else RuntimeError("Unsupported key format")
+        raise last if last else RuntimeError("Unsupported or unreadable key file")
 
     def _disconnect(self) -> None:
         self._stop_follow_logs()
