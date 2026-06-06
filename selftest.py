@@ -161,7 +161,7 @@ def build_fake_tkinter():
     tk = types.ModuleType("tkinter")
     for name in ("END", "LEFT", "RIGHT", "TOP", "BOTTOM", "BOTH", "X", "Y",
                  "NONE", "WORD", "CHAR", "INSERT", "VERTICAL", "HORIZONTAL",
-                 "DISABLED", "NORMAL"):
+                 "DISABLED", "NORMAL", "FLAT"):
         setattr(tk, name, name.lower())
     tk.END = "end"
     tk.INSERT = "insert"
@@ -170,6 +170,8 @@ def build_fake_tkinter():
     tk.Listbox = FakeListbox
     tk.Canvas = FakeWidget
     tk.Menu = FakeWidget
+    tk.Menubutton = FakeWidget
+    tk.Label = FakeWidget
     tk.StringVar = _Var
     tk.BooleanVar = _Var
     tk.TclError = Exception

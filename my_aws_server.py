@@ -61,6 +61,9 @@ CONSOLE_BG = "#000000"
 CONSOLE_FG = "#00FF00"
 
 THEMES = {
+    "kali": {"bg": "#0c0c0c", "panel": "#1c1f24", "accent": "#367BF0",
+             "text": "#c8c8c8", "entry": "#16191d", "editor_bg": "#0f1115",
+             "editor_fg": "#d6d6d6", "ok": "#4caf50", "err": "#ff5252"},
     "dark": {"bg": "#1e1e2e", "panel": "#2a2a3c", "accent": "#5865f2",
              "text": "#e6e6e6", "entry": "#3a3a4f", "editor_bg": "#1b1b27",
              "editor_fg": "#f8f8f2", "ok": "#43b581", "err": "#f04747"},
@@ -70,6 +73,9 @@ THEMES = {
 }
 
 TOKEN_COLORS = {
+    "kali": {"keyword": "#367BF0", "string": "#4caf50", "comment": "#6a737d",
+             "number": "#56b6c2", "name_function": "#61afef",
+             "name_class": "#e5c07b", "operator": "#c8c8c8"},
     "dark": {"keyword": "#c586c0", "string": "#ce9178", "comment": "#6a9955",
              "number": "#b5cea8", "name_function": "#dcdcaa",
              "name_class": "#4ec9b0", "operator": "#d4d4d4"},
@@ -207,7 +213,7 @@ class AwsTelegramManager:
         self.root.title(APP_TITLE)
 
         self.settings = self._read_json(SETTINGS_FILE)
-        self.theme_name = self.settings.get("theme", "dark")
+        self.theme_name = self.settings.get("theme", "kali")
         self.lang = self.settings.get("language", "en")
         self.root.geometry(self.settings.get("geometry", APP_GEOMETRY))
         self.root.minsize(1100, 740)
@@ -242,12 +248,14 @@ class AwsTelegramManager:
         except tk.TclError:
             pass
 
+        self._build_kali_panel()
         self._build_connection_panel()
         self._build_status_bar()
         self._build_notebook()
         self._apply_theme(self.theme_name)
         self._load_profiles_into_combo()
         self._restore_last_profile()
+        self._tick_clock()
 
         # Restore last tab.
         try:
@@ -295,7 +303,55 @@ class AwsTelegramManager:
             self._highlight_editor()
 
     def _toggle_theme(self) -> None:
-        self._apply_theme("light" if self.theme_name == "dark" else "dark")
+        order = ["kali", "dark", "light"]
+        nxt = order[(order.index(self.theme_name) + 1) % len(order)] \
+            if self.theme_name in order else "kali"
+        self._apply_theme(nxt)
+
+    def _build_kali_panel(self) -> None:
+        bar = tk.Frame(self.root, bg="#0a0a0a", height=34)
+        bar.pack(side=tk.TOP, fill=tk.X)
+        bar.pack_propagate(False)
+
+        self._apps_btn = tk.Menubutton(
+            bar, text="  🐉 Applications  ", bg="#0a0a0a", fg="#367BF0",
+            activebackground="#367BF0", activeforeground="#ffffff",
+            font=("Segoe UI", 10, "bold"), relief=tk.FLAT, borderwidth=0)
+        menu = tk.Menu(self._apps_btn, tearoff=0, bg="#1c1f24", fg="#c8c8c8",
+                       activebackground="#367BF0", activeforeground="#ffffff")
+        for label, idx in (("🗂  Files", 0), ("🔑  .env Editor", 1),
+                           ("⌨  Terminal", 2), ("▶  Code Runner", 3),
+                           ("🗓  Tasks", 4)):
+            menu.add_command(label=label,
+                             command=lambda i=idx: self.notebook.select(i))
+        self._apps_btn.config(menu=menu)
+        self._apps_btn.pack(side=tk.LEFT)
+
+        tk.Label(bar, text="Kali — AWS Server Console", bg="#0a0a0a",
+                 fg="#777777", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=12)
+
+        self.panel_clock = tk.Label(bar, text="", bg="#0a0a0a", fg="#c8c8c8",
+                                    font=("Consolas", 10))
+        self.panel_clock.pack(side=tk.RIGHT, padx=10)
+        self.panel_conn = tk.Label(bar, text="●  offline", bg="#0a0a0a",
+                                   fg="#ff5252", font=("Segoe UI", 9, "bold"))
+        self.panel_conn.pack(side=tk.RIGHT, padx=6)
+
+    def _tick_clock(self) -> None:
+        try:
+            now = datetime.datetime.now().strftime("%a %d %b  %H:%M:%S")
+            if hasattr(self, "panel_clock"):
+                self.panel_clock.config(text=now)
+            if hasattr(self, "panel_conn"):
+                if self.connected:
+                    self.panel_conn.config(
+                        text=f"●  {self.user_var.get().strip()}@{self.host_var.get().strip()}",
+                        fg="#4caf50")
+                else:
+                    self.panel_conn.config(text="●  offline", fg="#ff5252")
+        except Exception:
+            pass
+        self.root.after(1000, self._tick_clock)
 
     def _on_language_change(self, _e=None) -> None:
         self.lang = self.language_var.get()
