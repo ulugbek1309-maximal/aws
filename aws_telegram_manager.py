@@ -224,11 +224,6 @@ class AwsTelegramManager:
         self._all_entries: list[dict] = []
         self._visible_entries: list[dict] = []
 
-        self._log_stop = threading.Event()
-        self._log_following = False
-        self._log_channel = None
-        self._console_lines: list[str] = []
-
         self._cmd_history: list[str] = []
         self._cmd_index = 0
 
@@ -396,10 +391,7 @@ class AwsTelegramManager:
         self.port_var.set(data.get("port", HINT_PORT))
         self.user_var.set(data.get("user", HINT_USERNAME))
         self.key_var.set(data.get("key", ""))
-        self.service_var.set(data.get("service", HINT_SERVICE))
-        self.logpath_var.set(data.get("log_path", HINT_LOG_PATH))
         self.upload_target_var.set(data.get("upload_target", HINT_UPLOAD_TARGET))
-        self.manager_var.set(data.get("manager", "systemd"))
 
     def _save_profile(self) -> None:
         name = simpledialog.askstring("Save Profile", "Profile name:",
@@ -411,8 +403,7 @@ class AwsTelegramManager:
         profiles[name] = {  # passphrase intentionally not stored
             "host": self.host_var.get().strip(), "port": self.port_var.get().strip() or HINT_PORT,
             "user": self.user_var.get().strip() or HINT_USERNAME, "key": self.key_var.get().strip(),
-            "service": self.service_var.get().strip(), "log_path": self.logpath_var.get().strip(),
-            "upload_target": self.upload_target_var.get().strip(), "manager": self.manager_var.get(),
+            "upload_target": self.upload_target_var.get().strip(),
         }
         self._write_json(PROFILE_FILE, profiles)
         self._load_profiles_into_combo()
@@ -463,7 +454,6 @@ class AwsTelegramManager:
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
         self._build_files_tab()
-        self._build_controller_tab()
         self._build_env_tab()
         self._build_terminal_tab()
         self._build_runner_tab()
@@ -935,222 +925,6 @@ class AwsTelegramManager:
         return count
 
     # ================================================================== #
-    #  TAB 2 - Controller
-    # ================================================================== #
-    def _build_controller_tab(self) -> None:
-        tab = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(tab, text=self._t("tab_ctrl"))
-
-        cfg = ttk.Frame(tab, style="Panel.TFrame", padding=8)
-        cfg.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(cfg, text=self._t("manager"), style="Panel.TLabel").grid(row=0, column=0, sticky="w", padx=4, pady=4)
-        self.manager_var = tk.StringVar(value="systemd")
-        ttk.Combobox(cfg, textvariable=self.manager_var, values=["systemd", "pm2"], width=10, state="readonly").grid(row=0, column=1, padx=4, pady=4, sticky="w")
-        ttk.Label(cfg, text=self._t("service"), style="Panel.TLabel").grid(row=0, column=2, sticky="e", padx=4)
-        self.service_var = tk.StringVar(value=HINT_SERVICE)
-        ttk.Entry(cfg, textvariable=self.service_var, width=18).grid(row=0, column=3, padx=4, pady=4)
-        ttk.Label(cfg, text=self._t("bot"), style="Panel.TLabel").grid(row=0, column=4, sticky="e", padx=4)
-        self.bot_dot = tk.Canvas(cfg, width=14, height=14, highlightthickness=0)
-        self._bot_dot = self.bot_dot.create_oval(2, 2, 12, 12, fill="#888888")
-        self.bot_dot.grid(row=0, column=5, padx=2)
-        self.bot_status_var = tk.StringVar(value="unknown")
-        ttk.Label(cfg, textvariable=self.bot_status_var, style="Panel.TLabel").grid(row=0, column=6, sticky="w", padx=2)
-
-        ttk.Label(cfg, text=self._t("log_path"), style="Panel.TLabel").grid(row=1, column=0, sticky="w", padx=4, pady=4)
-        self.logpath_var = tk.StringVar(value=HINT_LOG_PATH)
-        ttk.Entry(cfg, textvariable=self.logpath_var, width=46).grid(row=1, column=1, columnspan=3, padx=4, pady=4, sticky="we")
-        ttk.Label(cfg, text=self._t("log_lines"), style="Panel.TLabel").grid(row=1, column=4, sticky="e", padx=4)
-        self.loglines_var = tk.StringVar(value="50")
-        ttk.Entry(cfg, textvariable=self.loglines_var, width=6).grid(row=1, column=5, columnspan=2, padx=4, pady=4, sticky="w")
-
-        b1 = ttk.Frame(tab)
-        b1.pack(fill=tk.X, pady=(0, 4))
-        for txt, act in (("start", "start"), ("stop", "stop"), ("restart", "restart"), ("status", "status")):
-            ttk.Button(b1, text=self._t(txt), command=lambda a=act: self._service_action(a)).pack(side=tk.LEFT, padx=3)
-        ttk.Button(b1, text=self._t("check_status"), command=self._check_status).pack(side=tk.LEFT, padx=3)
-        self.auto_status_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(b1, text=self._t("auto_refresh"), variable=self.auto_status_var, command=self._toggle_auto_status).pack(side=tk.LEFT, padx=6)
-        ttk.Button(b1, text=self._t("renew_ssl"), command=lambda: self._exec_simple("sudo certbot renew")).pack(side=tk.LEFT, padx=3)
-
-        b2 = ttk.Frame(tab)
-        b2.pack(fill=tk.X, pady=(0, 8))
-        ttk.Button(b2, text=self._t("health"), command=self._server_health).pack(side=tk.LEFT, padx=3)
-        ttk.Button(b2, text=self._t("nginx_test"), command=lambda: self._exec_simple("sudo nginx -t")).pack(side=tk.LEFT, padx=3)
-        ttk.Button(b2, text=self._t("nginx_reload"), command=lambda: self._exec_simple("sudo systemctl reload nginx")).pack(side=tk.LEFT, padx=3)
-        ttk.Label(b2, text=self._t("log_filter"), style="TLabel").pack(side=tk.LEFT, padx=(10, 2))
-        self.logfilter_var = tk.StringVar()
-        self.logfilter_var.trace_add("write", lambda *_: self._rerender_console())
-        ttk.Entry(b2, textvariable=self.logfilter_var, width=14).pack(side=tk.LEFT)
-        self.follow_btn = ttk.Button(b2, text=self._t("stream"), style="Accent.TButton", command=self._toggle_follow_logs)
-        self.follow_btn.pack(side=tk.RIGHT, padx=3)
-        ttk.Button(b2, text=self._t("tail_once"), command=self._stream_logs_once).pack(side=tk.RIGHT, padx=3)
-        ttk.Button(b2, text=self._t("clear"), command=self._clear_console).pack(side=tk.RIGHT, padx=3)
-
-        self.console = tk.Text(tab, bg=CONSOLE_BG, fg=CONSOLE_FG, font=MONO_FONT, wrap=tk.WORD, insertbackground=CONSOLE_FG)
-        cs = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=self.console.yview)
-        self.console.config(yscrollcommand=cs.set)
-        cs.pack(side=tk.RIGHT, fill=tk.Y)
-        self.console.pack(fill=tk.BOTH, expand=True)
-
-    def _console_append(self, text: str) -> None:
-        for line in text.splitlines(keepends=True):
-            self._console_lines.append(line)
-        flt = self.logfilter_var.get().strip().lower()
-        if not flt or flt in text.lower():
-            self.console.insert(tk.END, text)
-            self.console.see(tk.END)
-
-    def _rerender_console(self) -> None:
-        flt = self.logfilter_var.get().strip().lower()
-        self.console.delete("1.0", tk.END)
-        for line in self._console_lines:
-            if not flt or flt in line.lower():
-                self.console.insert(tk.END, line)
-        self.console.see(tk.END)
-
-    def _clear_console(self) -> None:
-        self._console_lines = []
-        self.console.delete("1.0", tk.END)
-
-    def _build_service_cmd(self, action: str) -> str:
-        svc = self.service_var.get().strip() or HINT_SERVICE
-        if self.manager_var.get() == "pm2":
-            return f"pm2 describe {svc}" if action == "status" else f"pm2 {action} {svc}"
-        return f"sudo systemctl {action} {svc}"
-
-    def _service_action(self, action: str) -> None:
-        if not self._require_connection():
-            return
-        cmd = self._build_service_cmd(action)
-        self._ui(lambda: self._console_append(f"\n$ {cmd}\n"))
-        self._run_bg(self._task_exec_then_status, cmd, action != "status")
-
-    def _task_exec_then_status(self, cmd: str, then_check: bool) -> None:
-        self._task_exec_to_console(cmd)
-        if then_check:
-            time.sleep(0.6)
-            self._task_check_status()
-
-    def _server_health(self) -> None:
-        if not self._require_connection():
-            return
-        self._exec_simple("echo '== DISK =='; df -h; echo '== MEM =='; free -m; "
-                          "echo '== LOAD =='; uptime; echo '== TOP =='; "
-                          "ps -eo pid,pcpu,pmem,comm --sort=-pcpu | head -n 12")
-
-    def _exec_simple(self, cmd: str) -> None:
-        if not self._require_connection():
-            return
-        self._ui(lambda: self._console_append(f"\n$ {cmd}\n"))
-        self._run_bg(self._task_exec_to_console, cmd)
-
-    def _task_exec_to_console(self, cmd: str) -> None:
-        try:
-            _i, out_s, err_s = self.ssh_client.exec_command(cmd, timeout=90)
-            out = out_s.read().decode("utf-8", errors="replace")
-            err = err_s.read().decode("utf-8", errors="replace")
-        except Exception as exc:  # noqa: BLE001
-            self._error("Command error", exc)
-            return
-        result = (out or "") + (("\n[stderr]\n" + err) if err.strip() else "")
-        self._ui(lambda: self._console_append(result + "\n"))
-
-    def _check_status(self) -> None:
-        if not self._require_connection():
-            return
-        self._run_bg(self._task_check_status)
-
-    def _task_check_status(self) -> None:
-        svc = self.service_var.get().strip() or HINT_SERVICE
-        if self.manager_var.get() == "pm2":
-            cmd = f"pm2 describe {svc} | grep -i status | head -n1"
-            kw = "online"
-        else:
-            cmd = f"systemctl is-active {svc}"
-            kw = "active"
-        try:
-            _i, out_s, _e = self.ssh_client.exec_command(cmd, timeout=30)
-            out = out_s.read().decode("utf-8", errors="replace").strip()
-        except Exception as exc:  # noqa: BLE001
-            self._error("Status error", exc)
-            return
-        online = kw in out.lower()
-        if kw == "active" and "inactive" in out.lower():
-            online = False
-        label = out.splitlines()[0] if out else ("online" if online else "offline")
-
-        def update():
-            self.bot_dot.itemconfig(self._bot_dot, fill=self.palette["ok"] if online else self.palette["err"])
-            self.bot_status_var.set(label)
-
-        self._ui(update)
-
-    def _toggle_auto_status(self) -> None:
-        if self.auto_status_var.get():
-            self._schedule_auto_status()
-
-    def _schedule_auto_status(self) -> None:
-        if self.auto_status_var.get() and self.connected:
-            self._check_status()
-            self.root.after(8000, self._schedule_auto_status)
-
-    def _resolve_log_lines(self) -> str:
-        v = self.loglines_var.get().strip()
-        return v if v.isdigit() and int(v) > 0 else "50"
-
-    def _stream_logs_once(self) -> None:
-        if not self._require_connection():
-            return
-        self._exec_simple(f"tail -n {self._resolve_log_lines()} {self.logpath_var.get().strip() or HINT_LOG_PATH}")
-
-    def _toggle_follow_logs(self) -> None:
-        self._stop_follow_logs() if self._log_following else self._start_follow_logs()
-
-    def _start_follow_logs(self) -> None:
-        if not self._require_connection():
-            return
-        log_path = self.logpath_var.get().strip() or HINT_LOG_PATH
-        self._log_stop.clear()
-        self._log_following = True
-        self.follow_btn.config(text=self._t("stop_stream"))
-        self._console_append(f"\n$ tail -f -n {self._resolve_log_lines()} {log_path}\n")
-        self._run_bg(self._task_follow_logs, log_path)
-
-    def _stop_follow_logs(self) -> None:
-        self._log_stop.set()
-        if self._log_channel is not None:
-            try:
-                self._log_channel.close()
-            except Exception:  # noqa: BLE001
-                pass
-        self._log_following = False
-        try:
-            self.follow_btn.config(text=self._t("stream"))
-        except tk.TclError:
-            pass
-
-    def _task_follow_logs(self, log_path: str) -> None:
-        try:
-            channel = self.ssh_client.get_transport().open_session()
-            self._log_channel = channel
-            channel.exec_command(f"tail -f -n {self._resolve_log_lines()} {log_path}")
-            while not self._log_stop.is_set():
-                if channel.recv_ready():
-                    data = channel.recv(4096).decode("utf-8", errors="replace")
-                    if data:
-                        self._ui(lambda d=data: self._console_append(d))
-                elif channel.exit_status_ready() and not channel.recv_ready():
-                    break
-                else:
-                    time.sleep(0.2)
-        except Exception as exc:  # noqa: BLE001
-            self._error("Log stream error", exc)
-        finally:
-            self._log_channel = None
-            self._log_following = False
-            self._ui(lambda: self.follow_btn.config(text=self._t("stream")))
-
-    # ================================================================== #
     #  TAB 3 - .env
     # ================================================================== #
     def _build_env_tab(self) -> None:
@@ -1616,8 +1390,6 @@ class AwsTelegramManager:
             self._set_status(True, f"{self._t('connected')}: {c['user']}@{c['host']}:{c['port']}")
             self.refresh_listing()
             self._terminal_sync_prompt()
-            if self.auto_status_var.get():
-                self._schedule_auto_status()
 
         self._ui(finish)
 
@@ -1647,7 +1419,6 @@ class AwsTelegramManager:
         raise last if last else RuntimeError("Unsupported or unreadable key file")
 
     def _disconnect(self) -> None:
-        self._stop_follow_logs()
         try:
             if self.sftp_client:
                 self.sftp_client.close()
