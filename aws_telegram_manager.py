@@ -118,6 +118,8 @@ LANG = {
         "env_path": ".env path:", "load_env": "Load .env", "save_env": "Save .env",
         "quick": "Quick:", "run": "Run", "rename": "Rename",
         "copy_path": "Copy path", "chmod": "Permissions (chmod)",
+        "tab_runner": "  Code Runner  ", "interpreter": "Interpreter:",
+        "run_code": "Run Code (Ctrl+Enter)", "load_open": "Load open file",
     },
     "uz": {
         "connect": "Ulanish", "disconnect": "Uzish",
@@ -147,6 +149,8 @@ LANG = {
         "env_path": ".env yo'li:", "load_env": ".env yuklash", "save_env": ".env saqlash",
         "quick": "Tez:", "run": "Ishga tushir", "rename": "Nomini o'zgartir",
         "copy_path": "Yo'lni nusxalash", "chmod": "Ruxsatlar (chmod)",
+        "tab_runner": "  Kod ishga tushirish  ", "interpreter": "Interpretator:",
+        "run_code": "Kodni ishga tushir (Ctrl+Enter)", "load_open": "Ochiq faylni yuklash",
     },
     "ru": {
         "connect": "Подключить", "disconnect": "Отключить",
@@ -177,6 +181,8 @@ LANG = {
         "save_env": "Сохранить .env", "quick": "Быстро:", "run": "Выполнить",
         "rename": "Переименовать", "copy_path": "Копировать путь",
         "chmod": "Права (chmod)",
+        "tab_runner": "  Запуск кода  ", "interpreter": "Интерпретатор:",
+        "run_code": "Выполнить код (Ctrl+Enter)", "load_open": "Загрузить открытый файл",
     },
 }
 
@@ -460,6 +466,7 @@ class AwsTelegramManager:
         self._build_controller_tab()
         self._build_env_tab()
         self._build_terminal_tab()
+        self._build_runner_tab()
 
     # ================================================================== #
     #  TAB 1 - File manager
@@ -1305,6 +1312,94 @@ class AwsTelegramManager:
                 self._term_write_ansi(out)
             if err.strip():
                 self._term_write_ansi(err)
+
+        self._ui(update)
+
+    # ================================================================== #
+    #  TAB 5 - Code Runner (run Python/code on the server)
+    # ================================================================== #
+    def _build_runner_tab(self) -> None:
+        tab = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(tab, text=self._t("tab_runner"))
+
+        top = ttk.Frame(tab)
+        top.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(top, text=self._t("interpreter")).pack(side=tk.LEFT, padx=(0, 4))
+        self.interp_var = tk.StringVar(value="python3")
+        ic = ttk.Combobox(top, textvariable=self.interp_var, width=12,
+                          values=["python3", "python", "node", "bash"])
+        ic.pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text=self._t("run_code"), style="Accent.TButton",
+                   command=self._run_code).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text=self._t("load_open"), command=self._load_open_into_runner).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text=self._t("clear"),
+                   command=lambda: self.runner_output.delete("1.0", tk.END)).pack(side=tk.RIGHT, padx=4)
+
+        paned = ttk.Panedwindow(tab, orient=tk.VERTICAL)
+        paned.pack(fill=tk.BOTH, expand=True)
+
+        code_frame = ttk.Frame(paned)
+        cs = ttk.Scrollbar(code_frame, orient=tk.VERTICAL)
+        self.code_editor = tk.Text(code_frame, font=MONO_FONT, wrap=tk.NONE,
+                                   undo=True, height=14, yscrollcommand=cs.set)
+        cs.config(command=self.code_editor.yview)
+        cs.pack(side=tk.RIGHT, fill=tk.Y)
+        self.code_editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.code_editor.insert("1.0", "# Write Python (or other) code here and press Ctrl+Enter\nprint('Hello from the server!')\n")
+        self._themed_texts.append(self.code_editor)
+        self.code_editor.bind("<Control-Return>", lambda e: (self._run_code(), "break")[1])
+        paned.add(code_frame, weight=3)
+
+        out_frame = ttk.Frame(paned)
+        os_ = ttk.Scrollbar(out_frame, orient=tk.VERTICAL)
+        self.runner_output = tk.Text(out_frame, bg=CONSOLE_BG, fg=CONSOLE_FG,
+                                     font=MONO_FONT, wrap=tk.WORD,
+                                     insertbackground=CONSOLE_FG, yscrollcommand=os_.set)
+        os_.config(command=self.runner_output.yview)
+        os_.pack(side=tk.RIGHT, fill=tk.Y)
+        self.runner_output.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        paned.add(out_frame, weight=2)
+
+    def _load_open_into_runner(self) -> None:
+        if not self.active_file:
+            messagebox.showinfo("No file", "Open a file in the File Manager first.")
+            return
+        self.code_editor.delete("1.0", tk.END)
+        self.code_editor.insert("1.0", self.editor.get("1.0", "end-1c"))
+
+    def _runner_write(self, text: str) -> None:
+        self.runner_output.insert(tk.END, text)
+        self.runner_output.see(tk.END)
+
+    def _run_code(self) -> None:
+        if not self._require_connection():
+            return
+        code = self.code_editor.get("1.0", "end-1c")
+        if not code.strip():
+            return
+        interp = self.interp_var.get().strip() or "python3"
+        self._runner_write(f"\n$ {interp}  (cwd: {self.current_path})\n")
+        self._run_bg(self._task_run_code, interp, code)
+
+    def _task_run_code(self, interp: str, code: str) -> None:
+        # Feed the code to the interpreter via stdin; runs in the current dir.
+        cmd = f"cd {shlex.quote(self.current_path)} && {interp}"
+        try:
+            stdin, stdout, stderr = self.ssh_client.exec_command(cmd, timeout=300)
+            stdin.write(code.encode("utf-8"))
+            stdin.channel.shutdown_write()
+            out = stdout.read().decode("utf-8", errors="replace")
+            err = stderr.read().decode("utf-8", errors="replace")
+        except Exception as exc:  # noqa: BLE001
+            self._error("Run error", exc)
+            return
+
+        def update():
+            if out:
+                self._runner_write(out)
+            if err.strip():
+                self._runner_write("\n[stderr]\n" + err)
+            self._runner_write("\n--- done ---\n")
 
         self._ui(update)
 
