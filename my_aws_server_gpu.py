@@ -1386,7 +1386,8 @@ class GpuApp:
             with dpg.group(horizontal=True):
                 dpg.add_text("Quick:")
                 for cmd in ("pip install -r requirements.txt", "ls -la", "df -h"):
-                    dpg.add_button(label=cmd, callback=lambda s, a, c=cmd: self.on_quick(c))
+                    dpg.add_button(label=cmd, user_data=cmd,
+                                   callback=lambda s, a, u: self.on_quick(u))
                 dpg.add_button(label="Clear", callback=lambda: self.on_term_clear())
             dpg.add_input_text(tag="term_output", multiline=True, width=-1, height=400,
                                readonly=True)
@@ -1448,7 +1449,8 @@ class GpuApp:
                         dpg.add_button(label="Refresh", callback=lambda: self.aot_refresh())
                         for label, act in (("Start", "start"), ("Stop", "stop"),
                                            ("Restart", "restart"), ("Status", "status")):
-                            dpg.add_button(label=label, callback=lambda s, a, ac=act: self.on_aot_action(ac))
+                            dpg.add_button(label=label, user_data=act,
+                                           callback=lambda s, a, u: self.on_aot_action(u))
                         dpg.add_button(label="Logs", callback=lambda: self.on_aot_logs())
                         dpg.add_button(label="Delete", callback=lambda: self.on_aot_delete())
                     dpg.add_listbox(tag="aot_list", items=[], num_items=6, width=-1)
@@ -1473,8 +1475,7 @@ class GpuApp:
                 self._build_runner_tab()
                 self._build_tasks_tab()
 
-        dpg.create_viewport(title=APP_TITLE, width=1360, height=880,
-                            clear_color=(0, 0, 0, 255))
+        dpg.create_viewport(title=APP_TITLE, width=1360, height=880)
         dpg.setup_dearpygui()
         dpg.show_viewport()
         dpg.set_primary_window("main_win", True)
@@ -1498,7 +1499,21 @@ class GpuApp:
 
 
 def main() -> None:
-    GpuApp().run()
+    import traceback
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu_error.log")
+    try:
+        GpuApp().run()
+    except Exception:  # noqa: BLE001
+        tb = traceback.format_exc()
+        try:
+            with open(log_path, "w", encoding="utf-8") as fh:
+                fh.write(tb)
+        except OSError:
+            pass
+        print("\n=== AWS GPU Manager crashed ===")
+        print(tb)
+        print(f"(A copy was written to: {log_path})")
+        raise
 
 
 if __name__ == "__main__":
