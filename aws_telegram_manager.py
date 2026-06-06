@@ -596,6 +596,7 @@ class AwsTelegramManager:
             self._apply_filter()
             self.path_var.set(self.current_path)
             self._rebuild_breadcrumb()
+            self._terminal_sync_prompt()
 
         self._ui(update)
 
@@ -1279,7 +1280,7 @@ class AwsTelegramManager:
         self.term.insert(tk.END, "AWS Manager console - type commands and press Enter.\n")
 
     def _terminal_prompt(self) -> None:
-        prompt = f"{self.current_path}$ "
+        prompt = f"{self.current_path}$ " if self.connected else "$ "
         self.term.insert(tk.END, prompt)
         self.term.mark_set("insert", "end-1c")
         self.term.mark_set("limit", "insert")
@@ -1395,6 +1396,26 @@ class AwsTelegramManager:
     def _terminal_finish(self) -> None:
         self._term_busy = False
         self._terminal_prompt()
+
+    def _terminal_sync_prompt(self) -> None:
+        """Refresh the current (empty) prompt line to the real current_path.
+
+        Called after connecting and after file-manager navigation so the
+        console always shows the directory of the server you are on.
+        """
+        if not hasattr(self, "term") or self._term_busy:
+            return
+        if self._current_input().strip():
+            return  # don't disturb a half-typed command
+        try:
+            self.term.delete("limit linestart", "end-1c")
+        except tk.TclError:
+            pass
+        self.term.insert(tk.END, f"{self.current_path}$ ")
+        self.term.mark_set("insert", "end-1c")
+        self.term.mark_set("limit", "insert")
+        self.term.mark_gravity("limit", "left")
+        self.term.see(tk.END)
 
     # ================================================================== #
     #  TAB 5 - Code Runner (run Python/code on the server)
@@ -1594,6 +1615,7 @@ class AwsTelegramManager:
             self.connect_btn.config(state=tk.NORMAL)
             self._set_status(True, f"{self._t('connected')}: {c['user']}@{c['host']}:{c['port']}")
             self.refresh_listing()
+            self._terminal_sync_prompt()
             if self.auto_status_var.get():
                 self._schedule_auto_status()
 
