@@ -502,7 +502,12 @@ class GpuApp:
         # Files larger than this are not loaded into the editor widget, because
         # the immediate-mode text box re-measures the whole buffer every frame
         # and would stutter/lock up on huge or very-long-line files.
-        self.MAX_EDIT_CHARS = 400_000
+        self.MAX_EDIT_CHARS = 200_000
+        self._editor_readonly = False
+        # Captured here (on the main thread, where GpuApp is constructed) so
+        # worker threads can detect when they must marshal UI calls through the
+        # queue instead of touching dpg directly.
+        self._main_thread_id = threading.get_ident()
 
         self.settings = _read_json(SETTINGS_FILE)
         self.theme_name = self.settings.get("theme", "matrix")
@@ -524,8 +529,27 @@ class GpuApp:
         """Schedule a UI update to run on the main (render) thread."""
         self._ui_queue.put(fn)
 
+    def _ui(self, fn) -> None:
+        """Run a UI update safely from any thread.
+
+        If we are already on the main (render) thread, run it now; otherwise
+        queue it so it executes during the next frame. This guarantees no dpg.*
+        call ever runs from a worker thread (which would corrupt the C++ backend
+        and freeze/crash the app).
+        """
+        if threading.get_ident() == self._main_thread_id:
+            fn()
+        else:
+            self._ui_queue.put(fn)
+
+    def _set_value(self, tag, value) -> None:
+        self._ui(lambda: dpg.set_value(tag, value))
+
+    def _configure(self, tag, **kwargs) -> None:
+        self._ui(lambda: dpg.configure_item(tag, **kwargs))
+
     def _drain_ui(self) -> None:
-        for _ in range(64):  # cap work per frame so the UI stays responsive
+        for _ in range(128):  # cap work per frame so the UI stays responsive
             try:
                 fn = self._ui_queue.get_nowait()
             except queue.Empty:
@@ -537,11 +561,16 @@ class GpuApp:
 
     def _status(self, text: str, ok: bool = False) -> None:
         pal = PALETTES[self.theme_name]
-        try:
-            dpg.set_value("status_text", text)
-            dpg.configure_item("status_text", color=pal["ok"] if ok else pal["err"])
-        except Exception:  # noqa: BLE001
-            pass
+        color = pal["ok"] if ok else pal["err"]
+
+        def do():
+            try:
+                dpg.set_value("status_text", text)
+                dpg.configure_item("status_text", color=color)
+            except Exception:  # noqa: BLE001
+                pass
+
+        self._ui(do)
 
     def _require(self) -> bool:
         if not self.ssh.connected:
@@ -613,8 +642,8 @@ class GpuApp:
             return
         self.current_path = home
         self._status(f"{user}@{host}:{port}", ok=True)
-        dpg.configure_item("conn_btn", label="Disconnect")
-        dpg.set_value("in_pass", "")
+        self._configure("conn_btn", label="Disconnect")
+        self._set_value("in_pass", "")
         self.refresh_listing()
         self.cron_refresh()
         self.aot_refresh()
@@ -732,13 +761,16 @@ class GpuApp:
             return
         self.entries = rows
         self._render_file_list()
-        dpg.set_value("path_text", self.current_path)
+        self._set_value("path_text", self.current_path)
 
     def _render_file_list(self) -> None:
-        needle = (dpg.get_value("file_filter") or "").strip().lower()
-        items = [e["display"] for e in self.entries
-                 if e["name"] == ".." or not needle or needle in e["name"].lower()]
-        dpg.configure_item("file_list", items=items)
+        def do():
+            needle = (dpg.get_value("file_filter") or "").strip().lower()
+            items = [e["display"] for e in self.entries
+                     if e["name"] == ".." or not needle or needle in e["name"].lower()]
+            dpg.configure_item("file_list", items=items)
+
+        self._ui(do)
 
     def on_filter(self) -> None:
         self._render_file_list()
@@ -771,24 +803,45 @@ class GpuApp:
         try:
             text = self.ssh.read_file(path)
         except Exception as exc:  # noqa: BLE001
-            self._post(lambda: self._status(f"Open error: {exc}", ok=False))
+            self._status(f"Open error: {exc}", ok=False)
             return
-        if len(text) > self.MAX_EDIT_CHARS:
-            self._post(lambda: self._status(
-                f"File too large for the GPU editor ({len(text):,} chars). "
-                f"Use the Terminal (e.g. less/sed) instead.", ok=False))
+        n = len(text)
+        if n > self.MAX_EDIT_CHARS:
+            # Too big to edit on the GPU: show a read-only, truncated preview
+            # instead of freezing. active_file stays None so Save is blocked.
+            preview = text[:self.MAX_EDIT_CHARS]
+
+            def apply_ro():
+                self.active_file = None
+                self._editor_readonly = True
+                dpg.configure_item("editor", readonly=True)
+                dpg.set_value("editor", preview)
+                dpg.set_value(
+                    "editor_label",
+                    f"READ-ONLY preview - first {self.MAX_EDIT_CHARS:,} of {n:,} "
+                    f"chars - {path}")
+                self._status(
+                    f"Large file ({n:,} chars) opened read-only. "
+                    f"Edit it via the Terminal (nano/sed) instead.", ok=True)
+
+            self._ui(apply_ro)
             return
 
         def apply():
             self.active_file = path
+            self._editor_readonly = False
+            dpg.configure_item("editor", readonly=False)
             dpg.set_value("editor", text)
             dpg.set_value("editor_label", f"Editing: {path}")
             self._status(f"Opened: {path}", ok=True)
 
-        self._post(apply)
+        self._ui(apply)
 
     def on_save(self) -> None:
         if not self._require():
+            return
+        if getattr(self, "_editor_readonly", False):
+            self._status("Read-only preview - large files cannot be saved here", ok=False)
             return
         path = self.active_file
         if not path:
@@ -906,12 +959,12 @@ class GpuApp:
     def _do_upload(self, local: str, target: str) -> None:
         try:
             remote_root = self.ssh.upload_folder(
-                local, target, progress_cb=lambda f: dpg.set_value("upload_progress", f))
+                local, target, progress_cb=lambda f: self._set_value("upload_progress", f))
         except Exception as exc:  # noqa: BLE001
-            dpg.set_value("upload_progress", 0.0)
+            self._set_value("upload_progress", 0.0)
             self._status(f"Upload error: {exc}", ok=False)
             return
-        dpg.set_value("upload_progress", 0.0)
+        self._set_value("upload_progress", 0.0)
         self._status(f"Uploaded to: {remote_root}", ok=True)
         self._do_listing()
 
@@ -937,11 +990,12 @@ class GpuApp:
     def _do_download(self, remote_path, name, local, is_dir) -> None:
         try:
             count = self.ssh.download(remote_path, name, local, is_dir,
-                                      progress_cb=lambda f: dpg.set_value("upload_progress", f))
+                                      progress_cb=lambda f: self._set_value("upload_progress", f))
         except Exception as exc:  # noqa: BLE001
+            self._set_value("upload_progress", 0.0)
             self._status(f"Download error: {exc}", ok=False)
             return
-        dpg.set_value("upload_progress", 0.0)
+        self._set_value("upload_progress", 0.0)
         self._status(f"Downloaded {count} file(s) to: {local}", ok=True)
 
     def on_pick_key(self) -> None:
@@ -968,7 +1022,11 @@ class GpuApp:
         except Exception as exc:  # noqa: BLE001
             self._status(f".env open error: {exc}", ok=False)
             return
-        dpg.set_value("env_editor", text)
+        if len(text) > self.MAX_EDIT_CHARS:
+            self._set_value("env_editor", text[:self.MAX_EDIT_CHARS])
+            self._status(f".env preview truncated ({len(text):,} chars)", ok=True)
+            return
+        self._set_value("env_editor", text)
 
     def on_env_save(self) -> None:
         if not self._require():
@@ -992,8 +1050,11 @@ class GpuApp:
     #  Terminal
     # ================================================================= #
     def _term_log(self, text: str) -> None:
-        old = dpg.get_value("term_output") or ""
-        dpg.set_value("term_output", (old + text).rstrip("\n") + "\n")
+        def do():
+            old = dpg.get_value("term_output") or ""
+            dpg.set_value("term_output", (old + text).rstrip("\n") + "\n")
+
+        self._ui(do)
 
     def on_term_run(self) -> None:
         if not self.ssh.connected:
@@ -1021,7 +1082,7 @@ class GpuApp:
             self._term_log(out)
         if new_cwd:
             self.current_path = new_cwd
-            dpg.set_value("path_text", new_cwd)
+            self._set_value("path_text", new_cwd)
 
     def on_term_history(self, direction: int) -> None:
         if not self._cmd_history:
@@ -1054,7 +1115,7 @@ class GpuApp:
         try:
             rc, out, err = self.ssh.run_code(interp, code, self.current_path)
         except Exception as exc:  # noqa: BLE001
-            dpg.set_value("runner_output", f"[error] {exc}")
+            self._set_value("runner_output", f"[error] {exc}")
             return
         text = f"$ {interp}  (cwd: {self.current_path})\n"
         if out:
@@ -1062,7 +1123,9 @@ class GpuApp:
         if err.strip():
             text += "\n[stderr]\n" + err
         text += f"\n--- done (exit {rc}) ---"
-        dpg.set_value("runner_output", text)
+        if len(text) > self.MAX_EDIT_CHARS:
+            text = text[:self.MAX_EDIT_CHARS] + "\n--- output truncated ---"
+        self._set_value("runner_output", text)
 
     def on_load_open(self) -> None:
         if not self.active_file:
@@ -1088,7 +1151,7 @@ class GpuApp:
             self._status(f"cron error: {exc}", ok=False)
             return
         self.cron_lines = lines
-        dpg.configure_item("cron_list", items=lines or ["(no scheduled tasks)"])
+        self._configure("cron_list", items=lines or ["(no scheduled tasks)"])
 
     def on_cron_create(self) -> None:
         if not self._require():
@@ -1144,8 +1207,11 @@ class GpuApp:
     #  Tasks - always-on (systemd)
     # ================================================================= #
     def _tasks_log(self, text: str) -> None:
-        old = dpg.get_value("tasks_console") or ""
-        dpg.set_value("tasks_console", (old + text).rstrip("\n") + "\n")
+        def do():
+            old = dpg.get_value("tasks_console") or ""
+            dpg.set_value("tasks_console", (old + text).rstrip("\n") + "\n")
+
+        self._ui(do)
 
     def aot_refresh(self) -> None:
         if not self.ssh.connected:
@@ -1160,7 +1226,7 @@ class GpuApp:
             return
         self.aot_names = [nm for nm, _s in pairs]
         display = [f"{nm}  [{st}]" for nm, st in pairs]
-        dpg.configure_item("aot_list", items=display or ["(no always-on tasks)"])
+        self._configure("aot_list", items=display or ["(no always-on tasks)"])
 
     def on_aot_create(self) -> None:
         if not self._require():
