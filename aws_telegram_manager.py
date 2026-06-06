@@ -1212,52 +1212,52 @@ class AwsTelegramManager:
         self._ui(lambda: messagebox.showinfo("Saved", f"Saved {path}"))
 
     # ================================================================== #
-    #  TAB 4 - Terminal (ANSI colours + history)
+    #  TAB 4 - Terminal (inline, PythonAnywhere-style console)
     # ================================================================== #
+    #  You type directly INSIDE the console after the prompt (no separate
+    #  input box). Enter runs the command; Up/Down browse history; the
+    #  working directory persists between commands (cd is remembered).
+    # ================================================================== #
+    CWD_SENTINEL = "__ATM_CWD__:"
+
     def _build_terminal_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(tab, text=self._t("tab_term"))
+
         q = ttk.Frame(tab)
         q.pack(fill=tk.X, pady=(0, 6))
         ttk.Label(q, text=self._t("quick")).pack(side=tk.LEFT, padx=(0, 4))
         for cmd in ("pip install -r requirements.txt", "ls -la", "df -h"):
             ttk.Button(q, text=cmd, command=lambda c=cmd: self._quick_command(c)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(q, text=self._t("clear"), command=lambda: self.term_output.delete("1.0", tk.END)).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(q, text=self._t("clear"), command=self._terminal_clear).pack(side=tk.RIGHT, padx=2)
 
-        self.term_output = tk.Text(tab, bg=CONSOLE_BG, fg=CONSOLE_FG, font=MONO_FONT, wrap=tk.WORD, insertbackground=CONSOLE_FG)
-        ts = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=self.term_output.yview)
-        self.term_output.config(yscrollcommand=ts.set)
+        self.term = tk.Text(tab, bg=CONSOLE_BG, fg=CONSOLE_FG, font=MONO_FONT,
+                            wrap=tk.CHAR, insertbackground=CONSOLE_FG, undo=False)
+        ts = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=self.term.yview)
+        self.term.config(yscrollcommand=ts.set)
         ts.pack(side=tk.RIGHT, fill=tk.Y)
-        self.term_output.pack(fill=tk.BOTH, expand=True)
+        self.term.pack(fill=tk.BOTH, expand=True)
         for code, color in ANSI_COLORS.items():
-            self.term_output.tag_configure(f"ansi{code}", foreground=color)
+            self.term.tag_configure(f"ansi{code}", foreground=color)
 
-        ir = ttk.Frame(tab)
-        ir.pack(fill=tk.X, pady=(8, 0))
-        ttk.Label(ir, text="$").pack(side=tk.LEFT, padx=(0, 4))
-        self.term_input = ttk.Entry(ir)
-        self.term_input.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.term_input.bind("<Return>", self._run_terminal_command)
-        self.term_input.bind("<Up>", self._history_up)
-        self.term_input.bind("<Down>", self._history_down)
-        ttk.Button(ir, text=self._t("run"), command=self._run_terminal_command).pack(side=tk.LEFT, padx=4)
+        # Marks the boundary; text before it (output/prompt) is protected.
+        self.term.mark_set("limit", "1.0")
+        self.term.mark_gravity("limit", "left")
+        self._term_busy = False
 
-    def _history_up(self, _e=None) -> str:
-        if self._cmd_history:
-            self._cmd_index = max(0, self._cmd_index - 1)
-            self.term_input.delete(0, tk.END)
-            self.term_input.insert(0, self._cmd_history[self._cmd_index])
-        return "break"
+        # Inline editing bindings.
+        self.term.bind("<Return>", self._terminal_enter)
+        self.term.bind("<Up>", lambda e: self._terminal_history(-1))
+        self.term.bind("<Down>", lambda e: self._terminal_history(1))
+        self.term.bind("<Key>", self._terminal_key)
+        self.term.bind("<Button-1>", self._terminal_click)
 
-    def _history_down(self, _e=None) -> str:
-        if self._cmd_history:
-            self._cmd_index = min(len(self._cmd_history), self._cmd_index + 1)
-            self.term_input.delete(0, tk.END)
-            if self._cmd_index < len(self._cmd_history):
-                self.term_input.insert(0, self._cmd_history[self._cmd_index])
-        return "break"
+        self._terminal_banner()
+        self._terminal_prompt()
 
-    def _term_write_ansi(self, data: str) -> None:
+    # ----- Rendering helpers ----------------------------------------- #
+    def _term_write_ansi(self, data: str, at_end: bool = True) -> None:
+        index = tk.END if at_end else "insert"
         parts = re.split(r"(\x1b\[[0-9;]*m)", data)
         cur = None
         for part in parts:
@@ -1265,55 +1265,136 @@ class AwsTelegramManager:
                 continue
             m = re.match(r"\x1b\[([0-9;]*)m", part)
             if m:
-                codes = m.group(1).split(";")
                 cur = None
-                for c in codes:
+                for c in m.group(1).split(";"):
                     if c in ANSI_COLORS:
                         cur = f"ansi{c}"
                     elif c in ("0", ""):
                         cur = None
                 continue
-            if cur:
-                self.term_output.insert(tk.END, part, cur)
-            else:
-                self.term_output.insert(tk.END, part)
-        self.term_output.see(tk.END)
+            self.term.insert(index, part, cur if cur else ())
+        self.term.see(tk.END)
+
+    def _terminal_banner(self) -> None:
+        self.term.insert(tk.END, "AWS Manager console - type commands and press Enter.\n")
+
+    def _terminal_prompt(self) -> None:
+        prompt = f"{self.current_path}$ "
+        self.term.insert(tk.END, prompt)
+        self.term.mark_set("insert", "end-1c")
+        self.term.mark_set("limit", "insert")
+        self.term.mark_gravity("limit", "left")
+        self.term.see(tk.END)
+        self.term.focus_set()
+
+    def _terminal_clear(self) -> None:
+        self.term.delete("1.0", tk.END)
+        self._terminal_prompt()
+
+    # ----- Inline editing guards ------------------------------------- #
+    def _terminal_key(self, event):
+        if self._term_busy:
+            return "break"
+        # Navigation that must not cross into protected output.
+        if event.keysym in ("BackSpace", "Left") and self.term.compare("insert", "<=", "limit"):
+            return "break"
+        if event.keysym == "Home":
+            self.term.mark_set("insert", "limit")
+            return "break"
+        if event.keysym in ("Up", "Down", "Return"):
+            return None
+        # Any typing while the cursor is in the protected zone jumps to input.
+        if self.term.compare("insert", "<", "limit"):
+            self.term.mark_set("insert", "end-1c")
+        return None
+
+    def _terminal_click(self, _event):
+        # Allow clicking to view output, but typing always returns to input.
+        return None
+
+    def _current_input(self) -> str:
+        return self.term.get("limit", "end-1c")
+
+    def _set_input(self, text: str) -> None:
+        self.term.delete("limit", "end-1c")
+        self.term.insert("limit", text)
+        self.term.mark_set("insert", "end-1c")
+
+    def _terminal_history(self, direction: int):
+        if self._term_busy or not self._cmd_history:
+            return "break"
+        self._cmd_index = max(0, min(len(self._cmd_history), self._cmd_index + direction))
+        self._set_input(self._cmd_history[self._cmd_index] if self._cmd_index < len(self._cmd_history) else "")
+        return "break"
+
+    # ----- Command submission ---------------------------------------- #
+    def _terminal_enter(self, _event=None):
+        if self._term_busy:
+            return "break"
+        command = self._current_input().strip()
+        self.term.mark_set("insert", "end-1c")
+        self.term.insert("insert", "\n")
+        if command:
+            self._cmd_history.append(command)
+            self._cmd_index = len(self._cmd_history)
+        if not command:
+            self._terminal_prompt()
+            return "break"
+        if command in ("clear", "cls"):
+            self._terminal_clear()
+            return "break"
+        if not self.connected or not self.ssh_client:
+            self.term.insert(tk.END, "Not connected. Connect to the server first.\n")
+            self._terminal_prompt()
+            return "break"
+        self._term_busy = True
+        self._run_bg(self._task_terminal_exec, command)
+        return "break"
 
     def _quick_command(self, command: str) -> None:
-        if self._require_connection():
-            self._exec_terminal(command)
-
-    def _run_terminal_command(self, _e=None) -> None:
-        if not self._require_connection():
+        if self._term_busy:
             return
-        command = self.term_input.get().strip()
-        if not command:
-            return
-        self.term_input.delete(0, tk.END)
-        self._cmd_history.append(command)
-        self._cmd_index = len(self._cmd_history)
-        self._exec_terminal(command)
+        self._set_input(command)
+        self._terminal_enter()
 
-    def _exec_terminal(self, command: str) -> None:
-        self._term_write_ansi(f"\n{self.current_path}$ {command}\n")
-        self._run_bg(self._task_terminal_exec, f"cd {self.current_path} && {command}")
-
-    def _task_terminal_exec(self, full_cmd: str) -> None:
+    def _task_terminal_exec(self, command: str) -> None:
+        # Run in the current dir and report the resulting dir so 'cd' persists.
+        sentinel = self.CWD_SENTINEL
+        full = (f"cd {shlex.quote(self.current_path)} 2>/dev/null; {command}; "
+                f"printf '\\n{sentinel}%s\\n' \"$(pwd)\"")
         try:
-            _i, out_s, err_s = self.ssh_client.exec_command(full_cmd, timeout=180)
+            _i, out_s, err_s = self.ssh_client.exec_command(full, timeout=300)
             out = out_s.read().decode("utf-8", errors="replace")
             err = err_s.read().decode("utf-8", errors="replace")
         except Exception as exc:  # noqa: BLE001
             self._error("Terminal error", exc)
+            self._ui(self._terminal_finish)
             return
 
+        new_cwd = None
+        kept = []
+        for line in out.split("\n"):
+            if line.startswith(sentinel):
+                new_cwd = line[len(sentinel):].strip()
+            else:
+                kept.append(line)
+        out_clean = "\n".join(kept).rstrip("\n")
+
         def update():
-            if out:
-                self._term_write_ansi(out)
+            if out_clean:
+                self._term_write_ansi(out_clean + "\n")
             if err.strip():
-                self._term_write_ansi(err)
+                self._term_write_ansi(err if err.endswith("\n") else err + "\n")
+            if new_cwd:
+                self.current_path = new_cwd
+                self.path_var.set(new_cwd)
+            self._terminal_finish()
 
         self._ui(update)
+
+    def _terminal_finish(self) -> None:
+        self._term_busy = False
+        self._terminal_prompt()
 
     # ================================================================== #
     #  TAB 5 - Code Runner (run Python/code on the server)
