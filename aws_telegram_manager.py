@@ -508,6 +508,7 @@ class AwsTelegramManager:
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.file_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.file_list.bind("<<ListboxSelect>>", self._on_list_select)
+        self.file_list.bind("<ButtonRelease-1>", self._on_list_select)
         self.file_list.bind("<Double-Button-1>", self._on_list_double_click)
         self.file_list.bind("<Return>", self._on_list_open_key)
         self.file_list.bind("<Button-3>", self._show_context_menu)
@@ -704,12 +705,21 @@ class AwsTelegramManager:
         return "break"
 
     def _save_active_file(self) -> None:
-        if not self._require_connection() or not self.active_file:
-            if not self.active_file:
-                messagebox.showwarning("No file", "Open a file before saving.")
+        if not self._require_connection():
+            return
+        path = self.active_file
+        if not path:
+            # Fallback: if a file is highlighted in the list, save to it.
+            e = self._selected_entry()
+            if e and not e["is_dir"] and e["name"] != "..":
+                path = self._join(self.current_path, e["name"])
+                self.active_file = path
+                self.editor_label_var.set(f"Editing: {path}")
+        if not path:
+            messagebox.showwarning("No file", "Open or select a file before saving.")
             return
         content = self.editor.get("1.0", "end-1c")
-        self._run_bg(self._task_save_file, self.active_file, content)
+        self._run_bg(self._task_save_file, path, content)
 
     def _task_save_file(self, remote_path: str, content: str) -> None:
         try:

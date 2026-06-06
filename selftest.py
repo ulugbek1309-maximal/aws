@@ -415,6 +415,16 @@ def main():
     app._task_save_file("/home/ec2-user/big.py", big)
     check("large file saved fully", app.sftp_client.written.get("/home/ec2-user/big.py") == big.encode())
 
+    # T11c: Save fallback - no active_file but a file is selected
+    app.active_file = None
+    app._task_list_dir("/home/ec2-user")
+    app.file_list.selection_set(2)  # bot.py
+    app.editor.delete("1.0")
+    app.editor.insert("1.0", "fallback save content")
+    app._save_active_file()
+    check("save fallback uses selected file",
+          app.sftp_client.written.get("/home/ec2-user/bot.py") == b"fallback save content")
+
     # T9: cron create
     app._task_cron_create("30 3 * * * echo hi")
     check("cron command sent", any(c.startswith("crontab /tmp/") for c in app.ssh_client.cmds))
