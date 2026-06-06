@@ -120,6 +120,7 @@ LANG = {
         "copy_path": "Copy path", "chmod": "Permissions (chmod)",
         "tab_runner": "  Code Runner  ", "interpreter": "Interpreter:",
         "run_code": "Run Code (Ctrl+Enter)", "load_open": "Load open file",
+        "tab_tasks": "  Tasks  ",
     },
     "uz": {
         "connect": "Ulanish", "disconnect": "Uzish",
@@ -151,6 +152,7 @@ LANG = {
         "copy_path": "Yo'lni nusxalash", "chmod": "Ruxsatlar (chmod)",
         "tab_runner": "  Kod ishga tushirish  ", "interpreter": "Interpretator:",
         "run_code": "Kodni ishga tushir (Ctrl+Enter)", "load_open": "Ochiq faylni yuklash",
+        "tab_tasks": "  Vazifalar  ",
     },
     "ru": {
         "connect": "Подключить", "disconnect": "Отключить",
@@ -183,6 +185,7 @@ LANG = {
         "chmod": "Права (chmod)",
         "tab_runner": "  Запуск кода  ", "interpreter": "Интерпретатор:",
         "run_code": "Выполнить код (Ctrl+Enter)", "load_open": "Загрузить открытый файл",
+        "tab_tasks": "  Задачи  ",
     },
 }
 
@@ -457,6 +460,7 @@ class AwsTelegramManager:
         self._build_env_tab()
         self._build_terminal_tab()
         self._build_runner_tab()
+        self._build_tasks_tab()
 
     # ================================================================== #
     #  TAB 1 - File manager
@@ -1280,6 +1284,329 @@ class AwsTelegramManager:
         self._ui(update)
 
     # ================================================================== #
+    #  TAB 6 - Tasks (PythonAnywhere-style: Scheduled + Always-on)
+    # ================================================================== #
+    AOT_PREFIX = "atm-"  # systemd unit prefix for always-on tasks
+
+    def _build_tasks_tab(self) -> None:
+        tab = ttk.Frame(self.notebook, padding=8)
+        self.notebook.add(tab, text=self._t("tab_tasks"))
+
+        sub = ttk.Notebook(tab)
+        sub.pack(fill=tk.BOTH, expand=True)
+
+        # ---- Scheduled tasks (cron) -------------------------------- #
+        sched = ttk.Frame(sub, padding=8)
+        sub.add(sched, text="  Scheduled tasks  ")
+        ttk.Label(
+            sched,
+            text="Run a command automatically at a set time (uses the server's crontab).",
+        ).pack(anchor="w", pady=(0, 6))
+
+        row = ttk.Frame(sched)
+        row.pack(fill=tk.X)
+        ttk.Label(row, text="Command:").pack(side=tk.LEFT)
+        self.cron_cmd_var = tk.StringVar()
+        ttk.Entry(row, textvariable=self.cron_cmd_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+
+        row2 = ttk.Frame(sched)
+        row2.pack(fill=tk.X, pady=4)
+        ttk.Label(row2, text="Frequency:").pack(side=tk.LEFT)
+        self.cron_freq_var = tk.StringVar(value="Daily")
+        ttk.Combobox(row2, textvariable=self.cron_freq_var, values=["Daily", "Hourly"],
+                     width=8, state="readonly").pack(side=tk.LEFT, padx=4)
+        ttk.Label(row2, text="Hour (UTC):").pack(side=tk.LEFT, padx=(8, 0))
+        self.cron_hour_var = tk.StringVar(value="0")
+        ttk.Spinbox(row2, from_=0, to=23, textvariable=self.cron_hour_var, width=4).pack(side=tk.LEFT, padx=4)
+        ttk.Label(row2, text="Minute:").pack(side=tk.LEFT, padx=(8, 0))
+        self.cron_min_var = tk.StringVar(value="0")
+        ttk.Spinbox(row2, from_=0, to=59, textvariable=self.cron_min_var, width=4).pack(side=tk.LEFT, padx=4)
+        ttk.Button(row2, text="Create", style="Accent.TButton", command=self._cron_create).pack(side=tk.LEFT, padx=6)
+        ttk.Button(row2, text="Refresh", command=self._cron_refresh).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row2, text="Delete selected", command=self._cron_delete).pack(side=tk.LEFT, padx=2)
+
+        lf = ttk.Frame(sched)
+        lf.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        sb = ttk.Scrollbar(lf, orient=tk.VERTICAL)
+        self.cron_list = tk.Listbox(lf, font=MONO_FONT, activestyle="none", yscrollcommand=sb.set)
+        sb.config(command=self.cron_list.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.cron_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._themed_listboxes.append(self.cron_list)
+        self._cron_lines: list[str] = []
+
+        # ---- Always-on tasks (systemd) ----------------------------- #
+        aot = ttk.Frame(sub, padding=8)
+        sub.add(aot, text="  Always-on tasks  ")
+        ttk.Label(
+            aot,
+            text="Keep a command running 24/7; it restarts automatically if it stops "
+            "(uses a systemd service, requires sudo).",
+        ).pack(anchor="w", pady=(0, 6))
+
+        arow = ttk.Frame(aot)
+        arow.pack(fill=tk.X)
+        ttk.Label(arow, text="Name:").pack(side=tk.LEFT)
+        self.aot_name_var = tk.StringVar()
+        ttk.Entry(arow, textvariable=self.aot_name_var, width=16).pack(side=tk.LEFT, padx=4)
+        ttk.Label(arow, text="Command:").pack(side=tk.LEFT)
+        self.aot_cmd_var = tk.StringVar()
+        ttk.Entry(arow, textvariable=self.aot_cmd_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        ttk.Button(arow, text="Create & Start", style="Accent.TButton", command=self._aot_create).pack(side=tk.LEFT, padx=4)
+
+        arow2 = ttk.Frame(aot)
+        arow2.pack(fill=tk.X, pady=4)
+        ttk.Button(arow2, text="Refresh", command=self._aot_refresh).pack(side=tk.LEFT, padx=2)
+        for label, act in (("Start", "start"), ("Stop", "stop"), ("Restart", "restart"), ("Status", "status")):
+            ttk.Button(arow2, text=label, command=lambda a=act: self._aot_action(a)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(arow2, text="Logs", command=self._aot_logs).pack(side=tk.LEFT, padx=2)
+        ttk.Button(arow2, text="Delete", command=self._aot_delete).pack(side=tk.LEFT, padx=2)
+
+        alf = ttk.Frame(aot)
+        alf.pack(fill=tk.X, pady=(6, 0))
+        asb = ttk.Scrollbar(alf, orient=tk.VERTICAL)
+        self.aot_list = tk.Listbox(alf, font=MONO_FONT, height=6, activestyle="none", yscrollcommand=asb.set)
+        asb.config(command=self.aot_list.yview)
+        asb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.aot_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._themed_listboxes.append(self.aot_list)
+        self._aot_names: list[str] = []
+
+        self.tasks_console = tk.Text(aot, bg=CONSOLE_BG, fg=CONSOLE_FG, font=MONO_FONT,
+                                     wrap=tk.WORD, height=10, insertbackground=CONSOLE_FG)
+        tcs = ttk.Scrollbar(aot, orient=tk.VERTICAL, command=self.tasks_console.yview)
+        self.tasks_console.config(yscrollcommand=tcs.set)
+        tcs.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tasks_console.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+
+    def _tasks_log(self, text: str) -> None:
+        self.tasks_console.insert(tk.END, text)
+        self.tasks_console.see(tk.END)
+
+    # ----- Scheduled tasks (cron) ------------------------------------ #
+    def _cron_refresh(self) -> None:
+        if not self._require_connection():
+            return
+        self._run_bg(self._task_cron_refresh)
+
+    def _task_cron_refresh(self) -> None:
+        rc, out, _err = self._remote_run("crontab -l 2>/dev/null")
+        lines = [ln for ln in out.split("\n") if ln.strip()] if rc == 0 else []
+
+        def update():
+            self._cron_lines = lines
+            self.cron_list.delete(0, tk.END)
+            if not lines:
+                self.cron_list.insert(tk.END, "(no scheduled tasks)")
+            for ln in lines:
+                self.cron_list.insert(tk.END, ln)
+
+        self._ui(update)
+
+    def _cron_create(self) -> None:
+        if not self._require_connection():
+            return
+        cmd = self.cron_cmd_var.get().strip()
+        if not cmd:
+            messagebox.showwarning("Missing command", "Enter a command to schedule.")
+            return
+        minute = self.cron_min_var.get().strip()
+        hour = self.cron_hour_var.get().strip()
+        if not minute.isdigit() or not (0 <= int(minute) <= 59):
+            messagebox.showwarning("Invalid minute", "Minute must be 0-59.")
+            return
+        if self.cron_freq_var.get() == "Daily":
+            if not hour.isdigit() or not (0 <= int(hour) <= 23):
+                messagebox.showwarning("Invalid hour", "Hour must be 0-23.")
+                return
+            schedule = f"{int(minute)} {int(hour)} * * *"
+        else:  # Hourly
+            schedule = f"{int(minute)} * * * *"
+        line = f"{schedule} {cmd}"
+        self._run_bg(self._task_cron_create, line)
+
+    def _task_cron_create(self, line: str) -> None:
+        rc, out, _err = self._remote_run("crontab -l 2>/dev/null")
+        existing = [ln for ln in out.split("\n") if ln.strip()] if rc == 0 else []
+        existing.append(line)
+        content = "\n".join(existing) + "\n"
+        wrc, _o, werr = self._remote_run_stdin("crontab -", content)
+        if wrc != 0:
+            self._error("Schedule error", IOError(werr or "crontab write failed"))
+            return
+        self._ui(self._cron_refresh)
+        self._ui(lambda: messagebox.showinfo("Scheduled", f"Task scheduled:\n{line}"))
+
+    def _cron_delete(self) -> None:
+        if not self._require_connection():
+            return
+        sel = self.cron_list.curselection()
+        if not sel or not self._cron_lines:
+            return
+        idx = sel[0]
+        if idx >= len(self._cron_lines):
+            return
+        target = self._cron_lines[idx]
+        if not messagebox.askyesno("Confirm", f"Delete scheduled task?\n{target}"):
+            return
+        self._run_bg(self._task_cron_delete, target)
+
+    def _task_cron_delete(self, target: str) -> None:
+        rc, out, _err = self._remote_run("crontab -l 2>/dev/null")
+        lines = [ln for ln in out.split("\n") if ln.strip()] if rc == 0 else []
+        remaining = [ln for ln in lines if ln != target]
+        content = ("\n".join(remaining) + "\n") if remaining else ""
+        if content:
+            wrc, _o, werr = self._remote_run_stdin("crontab -", content)
+        else:
+            wrc, _o, werr = self._remote_run("crontab -r")
+        if wrc != 0:
+            self._error("Delete error", IOError(werr or "crontab update failed"))
+            return
+        self._ui(self._cron_refresh)
+
+    # ----- Always-on tasks (systemd) --------------------------------- #
+    @staticmethod
+    def _sanitize_name(name: str) -> str:
+        return re.sub(r"[^a-zA-Z0-9_-]", "-", name).strip("-")
+
+    def _aot_refresh(self) -> None:
+        if not self._require_connection():
+            return
+        self._run_bg(self._task_aot_refresh)
+
+    def _task_aot_refresh(self) -> None:
+        rc, out, _err = self._remote_run(
+            f"systemctl list-unit-files --type=service --no-legend '{self.AOT_PREFIX}*.service' 2>/dev/null"
+        )
+        names, display = [], []
+        if rc == 0:
+            for ln in out.split("\n"):
+                parts = ln.split()
+                if not parts:
+                    continue
+                unit = parts[0]
+                state = parts[1] if len(parts) > 1 else ""
+                if unit.startswith(self.AOT_PREFIX) and unit.endswith(".service"):
+                    nm = unit[len(self.AOT_PREFIX):-len(".service")]
+                    names.append(nm)
+                    display.append(f"{nm}  [{state}]")
+
+        def update():
+            self._aot_names = names
+            self.aot_list.delete(0, tk.END)
+            if not display:
+                self.aot_list.insert(tk.END, "(no always-on tasks)")
+            for d in display:
+                self.aot_list.insert(tk.END, d)
+
+        self._ui(update)
+
+    def _aot_create(self) -> None:
+        if not self._require_connection():
+            return
+        name = self._sanitize_name(self.aot_name_var.get())
+        cmd = self.aot_cmd_var.get().strip()
+        if not name:
+            messagebox.showwarning("Missing name", "Enter a task name.")
+            return
+        if not cmd:
+            messagebox.showwarning("Missing command", "Enter a command to run.")
+            return
+        user = self.user_var.get().strip() or HINT_USERNAME
+        self._run_bg(self._task_aot_create, name, cmd, user, self.current_path)
+
+    def _task_aot_create(self, name: str, cmd: str, user: str, cwd: str) -> None:
+        unit = f"{self.AOT_PREFIX}{name}"
+        path = f"/etc/systemd/system/{unit}.service"
+        content = (
+            "[Unit]\n"
+            f"Description=ATM always-on task: {name}\n"
+            "After=network.target\n\n"
+            "[Service]\n"
+            f"User={user}\n"
+            f"WorkingDirectory={cwd}\n"
+            f"ExecStart={cmd}\n"
+            "Restart=always\n"
+            "RestartSec=3\n\n"
+            "[Install]\n"
+            "WantedBy=multi-user.target\n"
+        )
+        self._ui(lambda: self._tasks_log(f"\n$ create {unit}\n"))
+        try:
+            wrc, _o, werr = self._remote_run_stdin(
+                f"sudo -n tee {shlex.quote(path)} > /dev/null", content
+            )
+            if wrc != 0:
+                raise IOError(werr or "writing unit failed (passwordless sudo required)")
+            self._remote_run_checked("sudo -n systemctl daemon-reload")
+            rc, out, err = self._remote_run(f"sudo -n systemctl enable --now {shlex.quote(unit)}")
+            self._ui(lambda: self._tasks_log((out or "") + (err or "") + f"\nStarted {unit}\n"))
+        except Exception as exc:  # noqa: BLE001
+            self._error("Always-on error", exc)
+            return
+        self._ui(self._aot_refresh)
+
+    def _selected_aot(self) -> str | None:
+        sel = self.aot_list.curselection()
+        if not sel or not self._aot_names:
+            return None
+        idx = sel[0]
+        return self._aot_names[idx] if idx < len(self._aot_names) else None
+
+    def _aot_action(self, action: str) -> None:
+        if not self._require_connection():
+            return
+        name = self._selected_aot()
+        if not name:
+            messagebox.showwarning("No task", "Select an always-on task first.")
+            return
+        unit = f"{self.AOT_PREFIX}{name}"
+        cmd = f"sudo -n systemctl {action} {shlex.quote(unit)}"
+        self._ui(lambda: self._tasks_log(f"\n$ {cmd}\n"))
+        self._run_bg(self._task_aot_simple, cmd, action != "status")
+
+    def _task_aot_simple(self, cmd: str, refresh: bool) -> None:
+        rc, out, err = self._remote_run(cmd)
+        self._ui(lambda: self._tasks_log((out or "") + (err or "") + f"\n(exit {rc})\n"))
+        if refresh:
+            self._ui(self._aot_refresh)
+
+    def _aot_logs(self) -> None:
+        if not self._require_connection():
+            return
+        name = self._selected_aot()
+        if not name:
+            messagebox.showwarning("No task", "Select an always-on task first.")
+            return
+        unit = f"{self.AOT_PREFIX}{name}"
+        cmd = f"sudo -n journalctl -u {shlex.quote(unit)} -n 50 --no-pager"
+        self._ui(lambda: self._tasks_log(f"\n$ {cmd}\n"))
+        self._run_bg(self._task_aot_simple, cmd, False)
+
+    def _aot_delete(self) -> None:
+        if not self._require_connection():
+            return
+        name = self._selected_aot()
+        if not name:
+            return
+        unit = f"{self.AOT_PREFIX}{name}"
+        if not messagebox.askyesno("Confirm", f"Delete always-on task '{name}'?"):
+            return
+        self._run_bg(self._task_aot_delete, unit)
+
+    def _task_aot_delete(self, unit: str) -> None:
+        cmd = (
+            f"sudo -n systemctl disable --now {shlex.quote(unit)}; "
+            f"sudo -n rm -f /etc/systemd/system/{shlex.quote(unit)}.service; "
+            "sudo -n systemctl daemon-reload"
+        )
+        self._ui(lambda: self._tasks_log(f"\n$ delete {unit}\n"))
+        rc, out, err = self._remote_run(cmd)
+        self._ui(lambda: self._tasks_log((out or "") + (err or "") + f"\n(exit {rc})\n"))
+        self._ui(self._aot_refresh)
+
+    # ================================================================== #
     #  Syntax highlighting
     # ================================================================== #
     def _configure_highlight_tags(self) -> None:
@@ -1390,6 +1717,8 @@ class AwsTelegramManager:
             self._set_status(True, f"{self._t('connected')}: {c['user']}@{c['host']}:{c['port']}")
             self.refresh_listing()
             self._terminal_sync_prompt()
+            self._cron_refresh()
+            self._aot_refresh()
 
         self._ui(finish)
 
@@ -1511,6 +1840,16 @@ class AwsTelegramManager:
         rc, _out, err = self._remote_run(cmd, timeout)
         if rc != 0:
             raise IOError(err.strip() or f"Command failed (exit {rc}): {cmd}")
+
+    def _remote_run_stdin(self, cmd: str, data: str, timeout: int = 120):
+        """Run a command, feeding *data* to its stdin; return (rc, out, err)."""
+        stdin, stdout, stderr = self.ssh_client.exec_command(cmd, timeout=timeout)
+        stdin.write(data.encode("utf-8"))
+        stdin.channel.shutdown_write()
+        out = stdout.read().decode("utf-8", errors="replace")
+        err = stderr.read().decode("utf-8", errors="replace")
+        rc = stdout.channel.recv_exit_status()
+        return rc, out, err
 
     def _remote_write_file(self, path: str, content: str) -> None:
         """Write a file remotely, using 'sudo tee' when sudo mode is on."""
