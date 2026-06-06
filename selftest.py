@@ -367,9 +367,9 @@ def main():
     names = [e["name"] for e in app._visible_entries]
     check("listing names correct", names == ["..", "sub", "bot.py"])
 
-    # T3: select the file (index 2) -> opens in editor (ListboxSelect)
+    # T3: select the file (index 2) and Open -> opens in editor
     app.file_list.selection_set(2)
-    app._on_list_select()
+    app._open_selected()
     check("file opened: active_file set", app.active_file == "/home/ec2-user/bot.py")
     check("editor has file content", "print('hello')" in app.editor.get())
 
@@ -381,11 +381,12 @@ def main():
     # reset path
     app.current_path = "/home/ec2-user"
     app._task_list_dir("/home/ec2-user")
-    # T5: selecting '..' should not open
+    # T5: Open on '..' navigates up
     app.file_list.selection_set(0)
-    before = app.active_file
-    app._on_list_select()
-    check("select on '..' does not open", app.active_file == before)
+    app._open_selected()
+    check("open '..' navigates up", app.current_path == "/home")
+    app.current_path = "/home/ec2-user"
+    app._task_list_dir("/home/ec2-user")
 
     # T6: save file (sudo off)
     app.sudo_var = _Var(value=False)

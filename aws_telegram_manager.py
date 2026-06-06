@@ -480,6 +480,7 @@ class AwsTelegramManager:
         ttk.Button(tb, text=self._t("delete"), command=self._delete_selected).pack(side=tk.LEFT, padx=2)
         self.sudo_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(tb, text="sudo", variable=self.sudo_var).pack(side=tk.LEFT, padx=6)
+        ttk.Button(tb, text="Open", command=self._open_selected).pack(side=tk.LEFT, padx=2)
 
         # Breadcrumb
         self.breadcrumb = ttk.Frame(left, style="Panel.TFrame")
@@ -507,8 +508,6 @@ class AwsTelegramManager:
         sb.config(command=self.file_list.yview)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.file_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.file_list.bind("<<ListboxSelect>>", self._on_list_select)
-        self.file_list.bind("<ButtonRelease-1>", self._on_list_select)
         self.file_list.bind("<Double-Button-1>", self._on_list_double_click)
         self.file_list.bind("<Return>", self._on_list_open_key)
         self.file_list.bind("<Button-3>", self._show_context_menu)
@@ -637,15 +636,11 @@ class AwsTelegramManager:
             return
         self._run_bg(self._task_open_file, self._join(self.current_path, e["name"]))
 
-    def _on_list_select(self, _e=None) -> None:
-        # Fires whenever the selection changes (single click / keyboard).
-        # curselection is reliable inside this virtual event handler.
-        if not self.connected or not self.sftp_client:
+    def _open_selected(self) -> None:
+        """Open the highlighted file / enter the highlighted folder."""
+        if not self._require_connection():
             return
-        e = self._selected_entry()
-        if not e or e["is_dir"] or e["name"] == "..":
-            return
-        self._open_file_entry(e)
+        self._on_list_double_click()
 
     def _on_list_open_key(self, _e=None) -> str:
         # Enter key: open file or enter folder.
