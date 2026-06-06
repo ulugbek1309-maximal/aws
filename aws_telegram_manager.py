@@ -508,6 +508,8 @@ class AwsTelegramManager:
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.file_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.file_list.bind("<Double-Button-1>", self._on_list_double_click)
+        self.file_list.bind("<ButtonRelease-1>", self._on_list_click)
+        self.file_list.bind("<Return>", self._on_list_open_key)
         self.file_list.bind("<Button-3>", self._show_context_menu)
         self._themed_listboxes.append(self.file_list)
 
@@ -612,6 +614,27 @@ class AwsTelegramManager:
             return self._visible_entries[idx]
         return None
 
+    def _open_file_entry(self, e: dict) -> None:
+        """Open a file entry in the editor (shared by click / Enter)."""
+        if not self._confirm_discard():
+            return
+        self._run_bg(self._task_open_file, self._join(self.current_path, e["name"]))
+
+    def _on_list_click(self, _e=None) -> None:
+        # Single click opens a FILE (folders are just selected here so they
+        # can be deleted/downloaded; double-click a folder to enter it).
+        if not self.connected or not self.sftp_client:
+            return
+        e = self._selected_entry()
+        if not e or e["is_dir"] or e["name"] == "..":
+            return
+        self._open_file_entry(e)
+
+    def _on_list_open_key(self, _e=None) -> str:
+        # Enter key: open file or enter folder.
+        self._on_list_double_click()
+        return "break"
+
     def _on_list_double_click(self, _e=None) -> None:
         if not self._require_connection():
             return
@@ -627,9 +650,7 @@ class AwsTelegramManager:
             self.filter_var.set("")
             self.refresh_listing()
         else:
-            if not self._confirm_discard():
-                return
-            self._run_bg(self._task_open_file, self._join(self.current_path, e["name"]))
+            self._open_file_entry(e)
 
     def _task_open_file(self, remote_path: str) -> None:
         try:
