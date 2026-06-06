@@ -20,6 +20,7 @@ import shlex
 import threading
 import traceback
 import queue
+import random
 import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
@@ -60,7 +61,15 @@ SETTINGS_FILE = os.path.join(_HOME, ".aws_telegram_manager_settings.json")
 CONSOLE_BG = "#000000"
 CONSOLE_FG = "#00FF00"
 
+# Characters used by the Matrix "digital rain" animation in the top banner.
+MATRIX_CHARS = ("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                "アイウエオカキクケコサシスセソタチツテトナニヌネノ"
+                "ﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓ$#%&@*+=<>")
+
 THEMES = {
+    "matrix": {"bg": "#000000", "panel": "#001400", "accent": "#00ff41",
+               "text": "#00ff41", "entry": "#001a00", "editor_bg": "#000000",
+               "editor_fg": "#00ff41", "ok": "#39ff14", "err": "#ff3131"},
     "kali": {"bg": "#0c0c0c", "panel": "#1c1f24", "accent": "#367BF0",
              "text": "#c8c8c8", "entry": "#16191d", "editor_bg": "#0f1115",
              "editor_fg": "#d6d6d6", "ok": "#4caf50", "err": "#ff5252"},
@@ -73,6 +82,9 @@ THEMES = {
 }
 
 TOKEN_COLORS = {
+    "matrix": {"keyword": "#39ff14", "string": "#7fff00", "comment": "#008f11",
+               "number": "#00ff9f", "name_function": "#00ffcc",
+               "name_class": "#66ff66", "operator": "#00cc33"},
     "kali": {"keyword": "#367BF0", "string": "#4caf50", "comment": "#6a737d",
              "number": "#56b6c2", "name_function": "#61afef",
              "name_class": "#e5c07b", "operator": "#c8c8c8"},
@@ -213,7 +225,7 @@ class AwsTelegramManager:
         self.root.title(APP_TITLE)
 
         self.settings = self._read_json(SETTINGS_FILE)
-        self.theme_name = self.settings.get("theme", "kali")
+        self.theme_name = self.settings.get("theme", "matrix")
         self.lang = self.settings.get("language", "en")
         self.root.geometry(self.settings.get("geometry", APP_GEOMETRY))
         self.root.minsize(1100, 740)
@@ -248,6 +260,7 @@ class AwsTelegramManager:
         except tk.TclError:
             pass
 
+        self._build_matrix_rain()
         self._build_kali_panel()
         self._build_connection_panel()
         self._build_status_bar()
@@ -265,6 +278,7 @@ class AwsTelegramManager:
 
         self.root.after(80, self._pump_ui_queue)
         self.root.after(8000, self._watchdog)
+        self.root.after(120, self._rain_step)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _t(self, key: str) -> str:
@@ -303,39 +317,86 @@ class AwsTelegramManager:
             self._highlight_editor()
 
     def _toggle_theme(self) -> None:
-        order = ["kali", "dark", "light"]
+        order = ["matrix", "kali", "dark", "light"]
         nxt = order[(order.index(self.theme_name) + 1) % len(order)] \
-            if self.theme_name in order else "kali"
+            if self.theme_name in order else "matrix"
         self._apply_theme(nxt)
 
     def _build_kali_panel(self) -> None:
-        bar = tk.Frame(self.root, bg="#0a0a0a", height=34)
+        bar = tk.Frame(self.root, bg="#000000", height=34)
         bar.pack(side=tk.TOP, fill=tk.X)
         bar.pack_propagate(False)
 
         self._apps_btn = tk.Menubutton(
-            bar, text="  🐉 Applications  ", bg="#0a0a0a", fg="#367BF0",
-            activebackground="#367BF0", activeforeground="#ffffff",
-            font=("Segoe UI", 10, "bold"), relief=tk.FLAT, borderwidth=0)
-        menu = tk.Menu(self._apps_btn, tearoff=0, bg="#1c1f24", fg="#c8c8c8",
-                       activebackground="#367BF0", activeforeground="#ffffff")
-        for label, idx in (("🗂  Files", 0), ("🔑  .env Editor", 1),
-                           ("⌨  Terminal", 2), ("▶  Code Runner", 3),
-                           ("🗓  Tasks", 4)):
+            bar, text="  >_ Applications  ", bg="#000000", fg="#00ff41",
+            activebackground="#00ff41", activeforeground="#000000",
+            font=("Consolas", 10, "bold"), relief=tk.FLAT, borderwidth=0)
+        menu = tk.Menu(self._apps_btn, tearoff=0, bg="#001400", fg="#00ff41",
+                       activebackground="#00ff41", activeforeground="#000000",
+                       font=("Consolas", 10))
+        for label, idx in (("[~] Files", 0), ("[*] .env Editor", 1),
+                           ("[#] Terminal", 2), ("[>] Code Runner", 3),
+                           ("[+] Tasks", 4)):
             menu.add_command(label=label,
                              command=lambda i=idx: self.notebook.select(i))
         self._apps_btn.config(menu=menu)
         self._apps_btn.pack(side=tk.LEFT)
 
-        tk.Label(bar, text="Kali — AWS Server Console", bg="#0a0a0a",
-                 fg="#777777", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=12)
+        tk.Label(bar, text="root@matrix:~# ./aws_server --console", bg="#000000",
+                 fg="#008f11", font=("Consolas", 9, "bold")).pack(side=tk.LEFT, padx=12)
 
-        self.panel_clock = tk.Label(bar, text="", bg="#0a0a0a", fg="#c8c8c8",
-                                    font=("Consolas", 10))
+        self.panel_clock = tk.Label(bar, text="", bg="#000000", fg="#00ff41",
+                                    font=("Consolas", 10, "bold"))
         self.panel_clock.pack(side=tk.RIGHT, padx=10)
-        self.panel_conn = tk.Label(bar, text="●  offline", bg="#0a0a0a",
-                                   fg="#ff5252", font=("Segoe UI", 9, "bold"))
+        self.panel_conn = tk.Label(bar, text="● offline", bg="#000000",
+                                   fg="#ff3131", font=("Consolas", 9, "bold"))
         self.panel_conn.pack(side=tk.RIGHT, padx=6)
+
+    def _build_matrix_rain(self) -> None:
+        """Matrix-style 'digital rain' banner across the top of the window."""
+        self._rain_h = 78
+        self.matrix_canvas = tk.Canvas(self.root, height=self._rain_h,
+                                       bg="#000000", highlightthickness=0, bd=0)
+        self.matrix_canvas.pack(side=tk.TOP, fill=tk.X)
+        self._rain_font = ("Consolas", 13, "bold")
+        self._rain_col_w = 14
+        self._rain_drops: list[int] = []
+
+    def _rain_step(self) -> None:
+        try:
+            c = self.matrix_canvas
+            h = getattr(self, "_rain_h", 78)
+            w = c.winfo_width()
+            if not isinstance(w, int) or w <= 1:
+                rw = self.root.winfo_width()
+                w = rw if isinstance(rw, int) and rw > 1 else 1300
+            ncols = max(1, w // self._rain_col_w)
+            if len(self._rain_drops) != ncols:
+                self._rain_drops = [random.randint(-h, 0) for _ in range(ncols)]
+            c.delete("all")
+            for i, head in enumerate(self._rain_drops):
+                x = i * self._rain_col_w + 7
+                for t in range(6):
+                    y = head - t * self._rain_col_w
+                    if 0 <= y <= h:
+                        ch = random.choice(MATRIX_CHARS)
+                        if t == 0:
+                            color = "#ccffcc"
+                        elif t == 1:
+                            color = "#39ff14"
+                        elif t <= 3:
+                            color = "#00cc22"
+                        else:
+                            color = "#006611"
+                        c.create_text(x, y, text=ch, fill=color,
+                                      font=self._rain_font)
+                ny = head + self._rain_col_w
+                if ny - 6 * self._rain_col_w > h and random.random() < 0.12:
+                    ny = 0
+                self._rain_drops[i] = ny
+        except Exception:
+            pass
+        self.root.after(95, self._rain_step)
 
     def _tick_clock(self) -> None:
         try:
@@ -345,10 +406,10 @@ class AwsTelegramManager:
             if hasattr(self, "panel_conn"):
                 if self.connected:
                     self.panel_conn.config(
-                        text=f"●  {self.user_var.get().strip()}@{self.host_var.get().strip()}",
-                        fg="#4caf50")
+                        text=f"● {self.user_var.get().strip()}@{self.host_var.get().strip()}",
+                        fg="#39ff14")
                 else:
-                    self.panel_conn.config(text="●  offline", fg="#ff5252")
+                    self.panel_conn.config(text="● offline", fg="#ff3131")
         except Exception:
             pass
         self.root.after(1000, self._tick_clock)
