@@ -33,6 +33,7 @@ import json
 import stat
 import time
 import shlex
+import queue
 import random
 import threading
 import datetime
@@ -494,6 +495,15 @@ class GpuApp:
         self._confirm_cb = None
         self._dl_entry: dict | None = None
 
+        # UI updates from worker threads are marshalled to the render (main)
+        # thread through this queue to avoid races / freezes (e.g. when a large
+        # file is loaded into the editor while the GPU thread reads the buffer).
+        self._ui_queue: "queue.Queue" = queue.Queue()
+        # Files larger than this are not loaded into the editor widget, because
+        # the immediate-mode text box re-measures the whole buffer every frame
+        # and would stutter/lock up on huge or very-long-line files.
+        self.MAX_EDIT_CHARS = 400_000
+
         self.settings = _read_json(SETTINGS_FILE)
         self.theme_name = self.settings.get("theme", "matrix")
         self._themes: dict[str, int] = {}
@@ -509,6 +519,21 @@ class GpuApp:
     @staticmethod
     def _bg(fn, *args):
         threading.Thread(target=fn, args=args, daemon=True).start()
+
+    def _post(self, fn) -> None:
+        """Schedule a UI update to run on the main (render) thread."""
+        self._ui_queue.put(fn)
+
+    def _drain_ui(self) -> None:
+        for _ in range(64):  # cap work per frame so the UI stays responsive
+            try:
+                fn = self._ui_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                fn()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _status(self, text: str, ok: bool = False) -> None:
         pal = PALETTES[self.theme_name]
@@ -746,11 +771,21 @@ class GpuApp:
         try:
             text = self.ssh.read_file(path)
         except Exception as exc:  # noqa: BLE001
-            self._status(f"Open error: {exc}", ok=False)
+            self._post(lambda: self._status(f"Open error: {exc}", ok=False))
             return
-        self.active_file = path
-        dpg.set_value("editor", text)
-        dpg.set_value("editor_label", f"Editing: {path}")
+        if len(text) > self.MAX_EDIT_CHARS:
+            self._post(lambda: self._status(
+                f"File too large for the GPU editor ({len(text):,} chars). "
+                f"Use the Terminal (e.g. less/sed) instead.", ok=False))
+            return
+
+        def apply():
+            self.active_file = path
+            dpg.set_value("editor", text)
+            dpg.set_value("editor_label", f"Editing: {path}")
+            self._status(f"Opened: {path}", ok=True)
+
+        self._post(apply)
 
     def on_save(self) -> None:
         if not self._require():
@@ -1451,6 +1486,7 @@ class GpuApp:
         frame = 0
         while dpg.is_dearpygui_running():
             try:
+                self._drain_ui()
                 self._rain_frame()
                 frame += 1
                 if frame % 240 == 0:  # ~ every few seconds
