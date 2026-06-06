@@ -261,6 +261,10 @@ class FakeSFTP:
     def mkdir(self, p):
         pass
 
+    def remove(self, p):
+        self.files.pop(p, None)
+        self.written.pop(p, None)
+
 
 class FakeChannel:
     def recv_exit_status(self):
@@ -405,9 +409,15 @@ def main():
     app._task_run_code("python3", "print(1)")
     check("runner output shown", "output line" in app.runner_output.get())
 
+    # T11b: large multi-line save (1000 lines) via SFTP
+    big = "".join("line %d\n" % i for i in range(1000))
+    app.active_file = "/home/ec2-user/big.py"
+    app._task_save_file("/home/ec2-user/big.py", big)
+    check("large file saved fully", app.sftp_client.written.get("/home/ec2-user/big.py") == big.encode())
+
     # T9: cron create
     app._task_cron_create("30 3 * * * echo hi")
-    check("cron command sent", any("crontab -" == c for c in app.ssh_client.cmds))
+    check("cron command sent", any(c.startswith("crontab /tmp/") for c in app.ssh_client.cmds))
 
     # T10: always-on create builds a unit and enables it
     app._task_aot_create("mybot", "/usr/bin/python3 bot.py", "ec2-user", "/home/ec2-user")

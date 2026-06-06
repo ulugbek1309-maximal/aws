@@ -1299,17 +1299,22 @@ class AwsTelegramManager:
         self._run_bg(self._task_run_code, interp, code)
 
     def _task_run_code(self, interp: str, code: str) -> None:
-        # Feed the code to the interpreter via stdin; runs in the current dir.
-        cmd = f"cd {shlex.quote(self.current_path)} && {interp}"
+        # Upload the code to a temp file (handles any size), then run it.
+        tmp = self._mktemp("atm_run")
         try:
-            stdin, stdout, stderr = self.ssh_client.exec_command(cmd, timeout=300)
-            stdin.write(code.encode("utf-8"))
-            stdin.channel.shutdown_write()
-            out = stdout.read().decode("utf-8", errors="replace")
-            err = stderr.read().decode("utf-8", errors="replace")
+            self._sftp_put_text(tmp, code)
+            cmd = f"cd {shlex.quote(self.current_path)} && {interp} {shlex.quote(tmp)}"
+            _i, out_s, err_s = self.ssh_client.exec_command(cmd, timeout=600)
+            out = out_s.read().decode("utf-8", errors="replace")
+            err = err_s.read().decode("utf-8", errors="replace")
         except Exception as exc:  # noqa: BLE001
             self._error("Run error", exc)
             return
+        finally:
+            try:
+                self.sftp_client.remove(tmp)
+            except Exception:  # noqa: BLE001
+                pass
 
         def update():
             if out:
@@ -1467,7 +1472,15 @@ class AwsTelegramManager:
         existing = [ln for ln in out.split("\n") if ln.strip()] if rc == 0 else []
         existing.append(line)
         content = "\n".join(existing) + "\n"
-        wrc, _o, werr = self._remote_run_stdin("crontab -", content)
+        tmp = self._mktemp("atm_cron")
+        try:
+            self._sftp_put_text(tmp, content)
+            wrc, _o, werr = self._remote_run(f"crontab {shlex.quote(tmp)}")
+        except Exception as exc:  # noqa: BLE001
+            self._remote_run(f"rm -f {shlex.quote(tmp)}")
+            self._error("Schedule error", exc)
+            return
+        self._remote_run(f"rm -f {shlex.quote(tmp)}")
         if wrc != 0:
             self._error("Schedule error", IOError(werr or "crontab write failed"))
             return
@@ -1492,11 +1505,23 @@ class AwsTelegramManager:
         rc, out, _err = self._remote_run("crontab -l 2>/dev/null")
         lines = [ln for ln in out.split("\n") if ln.strip()] if rc == 0 else []
         remaining = [ln for ln in lines if ln != target]
-        content = ("\n".join(remaining) + "\n") if remaining else ""
-        if content:
-            wrc, _o, werr = self._remote_run_stdin("crontab -", content)
-        else:
-            wrc, _o, werr = self._remote_run("crontab -r")
+        if not remaining:
+            rc2, _o, werr = self._remote_run("crontab -r")
+            if rc2 != 0:
+                self._error("Delete error", IOError(werr or "crontab update failed"))
+                return
+            self._ui(self._cron_refresh)
+            return
+        content = "\n".join(remaining) + "\n"
+        tmp = self._mktemp("atm_cron")
+        try:
+            self._sftp_put_text(tmp, content)
+            wrc, _o, werr = self._remote_run(f"crontab {shlex.quote(tmp)}")
+        except Exception as exc:  # noqa: BLE001
+            self._remote_run(f"rm -f {shlex.quote(tmp)}")
+            self._error("Delete error", exc)
+            return
+        self._remote_run(f"rm -f {shlex.quote(tmp)}")
         if wrc != 0:
             self._error("Delete error", IOError(werr or "crontab update failed"))
             return
@@ -1891,20 +1916,37 @@ class AwsTelegramManager:
         rc = stdout.channel.recv_exit_status()
         return rc, out, err
 
+    def _mktemp(self, prefix: str = "atm") -> str:
+        """A unique writable temp path on the server (/tmp is world-writable)."""
+        return f"/tmp/{prefix}_{int(time.time() * 1000)}_{os.getpid()}"
+
+    def _sftp_put_text(self, path: str, text: str) -> None:
+        """Write text to a remote file via SFTP. Handles any size reliably."""
+        data = text.encode("utf-8")
+        with self.sftp_client.open(path, "w") as fh:
+            try:
+                fh.set_pipelined(True)  # faster, reliable large writes
+            except Exception:  # noqa: BLE001
+                pass
+            fh.write(data)
+
     def _remote_write_file(self, path: str, content: str) -> None:
-        """Write a file remotely, using 'sudo tee' when sudo mode is on."""
+        """Write a file remotely. Always uses SFTP (no stdin pipe), so large
+        multi-line content is uploaded reliably. In sudo mode it stages the
+        file in /tmp via SFTP then copies it into place with sudo."""
         if self._use_sudo():
-            cmd = f"sudo -n tee {shlex.quote(path)} > /dev/null"
-            stdin, stdout, stderr = self.ssh_client.exec_command(cmd, timeout=120)
-            stdin.write(content.encode("utf-8"))
-            stdin.channel.shutdown_write()
-            err = stderr.read().decode("utf-8", errors="replace")
-            rc = stdout.channel.recv_exit_status()
+            tmp = self._mktemp("atm_save")
+            try:
+                self._sftp_put_text(tmp, content)
+                rc, _o, err = self._remote_run(
+                    f"sudo -n cp -f {shlex.quote(tmp)} {shlex.quote(path)}"
+                )
+            finally:
+                self._remote_run(f"rm -f {shlex.quote(tmp)}")
             if rc != 0:
-                raise IOError(err.strip() or "sudo tee failed (passwordless sudo required)")
+                raise IOError(err.strip() or "sudo save failed (passwordless sudo required)")
         else:
-            with self.sftp_client.open(path, "w") as fh:
-                fh.write(content.encode("utf-8"))
+            self._sftp_put_text(path, content)
 
     def _on_close(self) -> None:
         if not self._confirm_discard():
