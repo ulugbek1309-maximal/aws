@@ -614,18 +614,34 @@ class AwsTelegramManager:
             return self._visible_entries[idx]
         return None
 
+    def _entry_at_event(self, event) -> dict | None:
+        """Resolve the clicked row from the mouse Y position (robust)."""
+        idx = self.file_list.nearest(event.y)
+        if idx < 0 or idx >= len(self._visible_entries):
+            return None
+        bbox = self.file_list.bbox(idx)
+        if not bbox:
+            return None
+        y0, h = bbox[1], bbox[3]
+        if event.y < y0 - 1 or event.y > y0 + h + 1:
+            return None  # click landed on empty space
+        self.file_list.selection_clear(0, tk.END)
+        self.file_list.selection_set(idx)
+        self.file_list.activate(idx)
+        return self._visible_entries[idx]
+
     def _open_file_entry(self, e: dict) -> None:
         """Open a file entry in the editor (shared by click / Enter)."""
         if not self._confirm_discard():
             return
         self._run_bg(self._task_open_file, self._join(self.current_path, e["name"]))
 
-    def _on_list_click(self, _e=None) -> None:
+    def _on_list_click(self, event=None) -> None:
         # Single click opens a FILE (folders are just selected here so they
         # can be deleted/downloaded; double-click a folder to enter it).
         if not self.connected or not self.sftp_client:
             return
-        e = self._selected_entry()
+        e = self._entry_at_event(event) if event is not None else self._selected_entry()
         if not e or e["is_dir"] or e["name"] == "..":
             return
         self._open_file_entry(e)
@@ -635,10 +651,10 @@ class AwsTelegramManager:
         self._on_list_double_click()
         return "break"
 
-    def _on_list_double_click(self, _e=None) -> None:
+    def _on_list_double_click(self, event=None) -> None:
         if not self._require_connection():
             return
-        e = self._selected_entry()
+        e = self._entry_at_event(event) if event is not None else self._selected_entry()
         if not e:
             return
         if e["name"] == "..":
@@ -1646,20 +1662,23 @@ class AwsTelegramManager:
     def _highlight_editor(self) -> None:
         if not HAS_PYGMENTS or not self.active_file:
             return
-        for tag in TOKEN_COLORS[self.theme_name]:
-            self.editor.tag_remove(tag, "1.0", tk.END)
         try:
-            lexer = get_lexer_for_filename(self.active_file)
-        except Exception:  # noqa: BLE001
-            lexer = TextLexer()
-        content = self.editor.get("1.0", "end-1c")
-        self.editor.mark_set("rs", "1.0")
-        for tok, value in lex(content, lexer):
-            tag = self._token_to_tag(tok)
-            self.editor.mark_set("re", f"rs+{len(value)}c")
-            if tag:
-                self.editor.tag_add(tag, "rs", "re")
-            self.editor.mark_set("rs", "re")
+            for tag in TOKEN_COLORS[self.theme_name]:
+                self.editor.tag_remove(tag, "1.0", tk.END)
+            try:
+                lexer = get_lexer_for_filename(self.active_file)
+            except Exception:  # noqa: BLE001
+                lexer = TextLexer()
+            content = self.editor.get("1.0", "end-1c")
+            self.editor.mark_set("rs", "1.0")
+            for tok, value in lex(content, lexer):
+                tag = self._token_to_tag(tok)
+                self.editor.mark_set("re", f"rs+{len(value)}c")
+                if tag:
+                    self.editor.tag_add(tag, "rs", "re")
+                self.editor.mark_set("rs", "re")
+        except Exception:  # noqa: BLE001 - highlighting must never block opening
+            pass
 
     @staticmethod
     def _token_to_tag(tok) -> str | None:
