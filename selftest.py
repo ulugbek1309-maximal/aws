@@ -363,25 +363,25 @@ def main():
     names = [e["name"] for e in app._visible_entries]
     check("listing names correct", names == ["..", "sub", "bot.py"])
 
-    # T3: click the file (index 2) -> opens in editor
-    ev = types.SimpleNamespace(y=2 * 16 + 5)
-    app._on_list_click(ev)
+    # T3: select the file (index 2) -> opens in editor (ListboxSelect)
+    app.file_list.selection_set(2)
+    app._on_list_select()
     check("file opened: active_file set", app.active_file == "/home/ec2-user/bot.py")
     check("editor has file content", "print('hello')" in app.editor.get())
 
     # T4: double-click folder (index 1) -> navigates
-    ev2 = types.SimpleNamespace(y=1 * 16 + 5)
-    app._on_list_double_click(ev2)
+    app.file_list.selection_set(1)
+    app._on_list_double_click()
     check("folder navigation changed path", app.current_path == "/home/ec2-user/sub")
 
     # reset path
     app.current_path = "/home/ec2-user"
     app._task_list_dir("/home/ec2-user")
-    # T5: click '..' should not open (it's a dir-like). single click does nothing
-    ev0 = types.SimpleNamespace(y=0 * 16 + 5)
+    # T5: selecting '..' should not open
+    app.file_list.selection_set(0)
     before = app.active_file
-    app._on_list_click(ev0)
-    check("click on '..' does not open", app.active_file == before)
+    app._on_list_select()
+    check("select on '..' does not open", app.active_file == before)
 
     # T6: save file (sudo off)
     app.sudo_var = _Var(value=False)
