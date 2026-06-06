@@ -614,22 +614,6 @@ class AwsTelegramManager:
             return self._visible_entries[idx]
         return None
 
-    def _entry_at_event(self, event) -> dict | None:
-        """Resolve the clicked row from the mouse Y position (robust)."""
-        idx = self.file_list.nearest(event.y)
-        if idx < 0 or idx >= len(self._visible_entries):
-            return None
-        bbox = self.file_list.bbox(idx)
-        if not bbox:
-            return None
-        y0, h = bbox[1], bbox[3]
-        if event.y < y0 - 1 or event.y > y0 + h + 1:
-            return None  # click landed on empty space
-        self.file_list.selection_clear(0, tk.END)
-        self.file_list.selection_set(idx)
-        self.file_list.activate(idx)
-        return self._visible_entries[idx]
-
     def _open_file_entry(self, e: dict) -> None:
         """Open a file entry in the editor (shared by click / Enter)."""
         if not self._confirm_discard():
@@ -1300,6 +1284,10 @@ class AwsTelegramManager:
         if not code.strip():
             return
         interp = self.interp_var.get().strip() or "python3"
+        if not re.fullmatch(r"[A-Za-z0-9_./ -]+", interp):
+            messagebox.showwarning("Invalid interpreter",
+                                   "Interpreter may only contain letters, digits, _ . / - and spaces.")
+            return
         self._runner_write(f"\n$ {interp}  (cwd: {self.current_path})\n")
         self._run_bg(self._task_run_code, interp, code)
 
@@ -1584,6 +1572,11 @@ class AwsTelegramManager:
         self._run_bg(self._task_aot_create, name, cmd, user, self.current_path)
 
     def _task_aot_create(self, name: str, cmd: str, user: str, cwd: str) -> None:
+        # Guard against unit-file injection via embedded newlines.
+        if any(("\n" in v) or ("\r" in v) for v in (cmd, user, cwd, name)):
+            self._error("Always-on error",
+                        ValueError("Name/command/path must be a single line."))
+            return
         unit = f"{self.AOT_PREFIX}{name}"
         path = f"/etc/systemd/system/{unit}.service"
         content = (
@@ -1600,18 +1593,18 @@ class AwsTelegramManager:
             "WantedBy=multi-user.target\n"
         )
         self._ui(lambda: self._tasks_log(f"\n$ create {unit}\n"))
+        tmp = self._mktemp("atm_unit")
         try:
-            wrc, _o, werr = self._remote_run_stdin(
-                f"sudo -n tee {shlex.quote(path)} > /dev/null", content
-            )
-            if wrc != 0:
-                raise IOError(werr or "writing unit failed (passwordless sudo required)")
+            self._sftp_put_text(tmp, content)
+            self._remote_run_checked(f"sudo -n cp -f {shlex.quote(tmp)} {shlex.quote(path)}")
             self._remote_run_checked("sudo -n systemctl daemon-reload")
             rc, out, err = self._remote_run(f"sudo -n systemctl enable --now {shlex.quote(unit)}")
             self._ui(lambda: self._tasks_log((out or "") + (err or "") + f"\nStarted {unit}\n"))
         except Exception as exc:  # noqa: BLE001
             self._error("Always-on error", exc)
             return
+        finally:
+            self._remote_run(f"rm -f {shlex.quote(tmp)}")
         self._ui(self._aot_refresh)
 
     def _selected_aot(self) -> str | None:
@@ -1785,6 +1778,9 @@ class AwsTelegramManager:
             self.current_path = home
             self.connect_btn.config(state=tk.NORMAL)
             self._set_status(True, f"{self._t('connected')}: {c['user']}@{c['host']}:{c['port']}")
+            self.passphrase_var.set("")
+            if not self.auto_reconnect_var.get() and self._last_conn:
+                self._last_conn["passphrase"] = None
             self.refresh_listing()
             self._terminal_sync_prompt()
             self._cron_refresh()
@@ -1910,16 +1906,6 @@ class AwsTelegramManager:
         rc, _out, err = self._remote_run(cmd, timeout)
         if rc != 0:
             raise IOError(err.strip() or f"Command failed (exit {rc}): {cmd}")
-
-    def _remote_run_stdin(self, cmd: str, data: str, timeout: int = 120):
-        """Run a command, feeding *data* to its stdin; return (rc, out, err)."""
-        stdin, stdout, stderr = self.ssh_client.exec_command(cmd, timeout=timeout)
-        stdin.write(data.encode("utf-8"))
-        stdin.channel.shutdown_write()
-        out = stdout.read().decode("utf-8", errors="replace")
-        err = stderr.read().decode("utf-8", errors="replace")
-        rc = stdout.channel.recv_exit_status()
-        return rc, out, err
 
     def _mktemp(self, prefix: str = "atm") -> str:
         """A unique writable temp path on the server (/tmp is world-writable)."""
