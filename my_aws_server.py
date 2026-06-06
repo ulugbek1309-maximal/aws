@@ -315,6 +315,9 @@ class AwsTelegramManager:
         self._configure_highlight_tags()
         if self.active_file:
             self._highlight_editor()
+        if hasattr(self, "editor_gutter"):
+            self.editor_gutter.configure(bg=p["panel"])
+            self._update_line_numbers()
 
     def _toggle_theme(self) -> None:
         order = ["matrix", "kali", "dark", "light"]
@@ -651,15 +654,25 @@ class AwsTelegramManager:
         ef.pack(fill=tk.BOTH, expand=True)
         ys = ttk.Scrollbar(ef, orient=tk.VERTICAL)
         xs = ttk.Scrollbar(ef, orient=tk.HORIZONTAL)
-        self.editor = tk.Text(ef, wrap=tk.NONE, font=MONO_FONT, undo=True, yscrollcommand=ys.set, xscrollcommand=xs.set)
-        ys.config(command=self.editor.yview)
+        self._editor_ys = ys
+        self.editor_gutter = tk.Canvas(ef, width=52, highlightthickness=0, bd=0,
+                                       bg=self.palette["panel"])
+        self.editor = tk.Text(ef, wrap=tk.NONE, font=MONO_FONT, undo=True,
+                              yscrollcommand=self._on_editor_yscroll, xscrollcommand=xs.set)
+        ys.config(command=self._on_editor_vscroll)
         xs.config(command=self.editor.xview)
         ys.pack(side=tk.RIGHT, fill=tk.Y)
         xs.pack(side=tk.BOTTOM, fill=tk.X)
+        self.editor_gutter.pack(side=tk.LEFT, fill=tk.Y)
         self.editor.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._themed_texts.append(self.editor)
         self.editor.bind("<Control-s>", self._on_ctrl_s)
         self.editor.bind("<KeyRelease>", self._on_editor_keyrelease)
+        self.editor.bind("<MouseWheel>", lambda _e: self.root.after(1, self._update_line_numbers))
+        self.editor.bind("<Button-4>", lambda _e: self.root.after(1, self._update_line_numbers))
+        self.editor.bind("<Button-5>", lambda _e: self.root.after(1, self._update_line_numbers))
+        self.editor.bind("<Configure>", self._update_line_numbers)
+        self._update_line_numbers()
 
     def _rebuild_breadcrumb(self) -> None:
         for w in self.breadcrumb.winfo_children():
@@ -780,6 +793,7 @@ class AwsTelegramManager:
             self._loaded_content = text
             self.editor_label_var.set(f"Editing: {remote_path}")
             self._highlight_editor()
+            self._update_line_numbers()
 
         self._ui(update)
 
@@ -1793,11 +1807,45 @@ class AwsTelegramManager:
             self.editor.tag_configure(tag, foreground=color)
 
     def _on_editor_keyrelease(self, _e=None) -> None:
+        self._update_line_numbers()
         if not HAS_PYGMENTS:
             return
         if self._highlight_job:
             self.root.after_cancel(self._highlight_job)
         self._highlight_job = self.root.after(400, self._highlight_editor)
+
+    def _on_editor_yscroll(self, *args) -> None:
+        try:
+            self._editor_ys.set(*args)
+        except Exception:
+            pass
+        self._update_line_numbers()
+
+    def _on_editor_vscroll(self, *args) -> None:
+        try:
+            self.editor.yview(*args)
+        except Exception:
+            pass
+        self._update_line_numbers()
+
+    def _update_line_numbers(self, _e=None) -> None:
+        g = getattr(self, "editor_gutter", None)
+        if g is None:
+            return
+        try:
+            g.delete("all")
+            fg = self.palette.get("text", "#888888")
+            i = self.editor.index("@0,0")
+            while True:
+                dline = self.editor.dlineinfo(i)
+                if dline is None:
+                    break
+                y = dline[1]
+                num = str(i).split(".")[0]
+                g.create_text(46, y, anchor="ne", text=num, fill=fg, font=MONO_FONT)
+                i = self.editor.index(f"{i}+1line")
+        except Exception:
+            pass
 
     def _highlight_editor(self) -> None:
         if not HAS_PYGMENTS or not self.active_file:
