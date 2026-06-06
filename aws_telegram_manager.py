@@ -16,6 +16,7 @@ import json
 import stat
 import time
 import re
+import shlex
 import threading
 import traceback
 import queue
@@ -476,6 +477,8 @@ class AwsTelegramManager:
         ttk.Button(tb, text=self._t("new_file"), command=self._new_file).pack(side=tk.LEFT, padx=2)
         ttk.Button(tb, text=self._t("new_folder"), command=self._new_folder).pack(side=tk.LEFT, padx=2)
         ttk.Button(tb, text=self._t("delete"), command=self._delete_selected).pack(side=tk.LEFT, padx=2)
+        self.sudo_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(tb, text="sudo", variable=self.sudo_var).pack(side=tk.LEFT, padx=6)
 
         # Breadcrumb
         self.breadcrumb = ttk.Frame(left, style="Panel.TFrame")
@@ -671,8 +674,7 @@ class AwsTelegramManager:
 
     def _task_save_file(self, remote_path: str, content: str) -> None:
         try:
-            with self.sftp_client.open(remote_path, "w") as fh:
-                fh.write(content.encode("utf-8"))
+            self._remote_write_file(remote_path, content)
         except Exception as exc:  # noqa: BLE001
             self._error("Save error", exc)
             return
@@ -717,7 +719,12 @@ class AwsTelegramManager:
 
     def _task_rename(self, old_p: str, new_p: str) -> None:
         try:
-            self.sftp_client.rename(old_p, new_p)
+            if self._use_sudo():
+                self._remote_run_checked(
+                    f"sudo -n mv {shlex.quote(old_p)} {shlex.quote(new_p)}"
+                )
+            else:
+                self.sftp_client.rename(old_p, new_p)
         except Exception as exc:  # noqa: BLE001
             self._error("Rename error", exc)
             return
@@ -741,7 +748,12 @@ class AwsTelegramManager:
 
     def _task_chmod(self, path: str, mode_int: int) -> None:
         try:
-            self.sftp_client.chmod(path, mode_int)
+            if self._use_sudo():
+                self._remote_run_checked(
+                    f"sudo -n chmod {oct(mode_int)[2:]} {shlex.quote(path)}"
+                )
+            else:
+                self.sftp_client.chmod(path, mode_int)
         except Exception as exc:  # noqa: BLE001
             self._error("chmod error", exc)
             return
@@ -757,8 +769,11 @@ class AwsTelegramManager:
 
     def _task_new_file(self, remote_path: str) -> None:
         try:
-            with self.sftp_client.open(remote_path, "x") as fh:
-                fh.write(b"")
+            if self._use_sudo():
+                self._remote_run_checked(f"sudo -n touch {shlex.quote(remote_path)}")
+            else:
+                with self.sftp_client.open(remote_path, "x") as fh:
+                    fh.write(b"")
         except Exception as exc:  # noqa: BLE001
             self._error("Create error", exc)
             return
@@ -773,7 +788,10 @@ class AwsTelegramManager:
 
     def _task_new_folder(self, remote_path: str) -> None:
         try:
-            self.sftp_client.mkdir(remote_path)
+            if self._use_sudo():
+                self._remote_run_checked(f"sudo -n mkdir -p {shlex.quote(remote_path)}")
+            else:
+                self.sftp_client.mkdir(remote_path)
         except Exception as exc:  # noqa: BLE001
             self._error("Mkdir error", exc)
             return
@@ -792,7 +810,9 @@ class AwsTelegramManager:
 
     def _task_delete(self, remote_path: str, is_dir: bool) -> None:
         try:
-            if is_dir:
+            if self._use_sudo():
+                self._remote_run_checked(f"sudo -n rm -rf {shlex.quote(remote_path)}")
+            elif is_dir:
                 self._rmtree(remote_path)
             else:
                 self.sftp_client.remove(remote_path)
@@ -829,18 +849,32 @@ class AwsTelegramManager:
         all_files = [os.path.join(r, f) for r, _d, fs in os.walk(local_dir) for f in fs]
         total = len(all_files) or 1
         self._ui(lambda: self.progress.config(maximum=total, value=0))
+        use_sudo = self._use_sudo()
+        # In sudo mode, stage into a writable /tmp dir, then sudo-copy across.
+        staging = f"/tmp/atm_upload_{int(time.time())}" if use_sudo else None
+        dest_root = self._join(staging, base) if use_sudo else remote_root
         try:
-            self._sftp_makedirs(remote_root)
+            if use_sudo:
+                self.sftp_client.mkdir(staging)
+            self._sftp_makedirs(dest_root)
             done = 0
             for r, _d, files in os.walk(local_dir):
                 rel = os.path.relpath(r, local_dir)
-                rdir = remote_root if rel == "." else self._join(remote_root, rel.replace(os.sep, "/"))
+                rdir = dest_root if rel == "." else self._join(dest_root, rel.replace(os.sep, "/"))
                 self._sftp_makedirs(rdir)
                 for fn in files:
                     self.sftp_client.put(os.path.join(r, fn), self._join(rdir, fn))
                     done += 1
                     self._ui(lambda d=done: self.progress.config(value=d))
+            if use_sudo:
+                self._remote_run_checked(
+                    f"sudo -n mkdir -p {shlex.quote(target)} && "
+                    f"sudo -n cp -r {shlex.quote(dest_root)} {shlex.quote(target)}/"
+                )
+                self._remote_run(f"rm -rf {shlex.quote(staging)}")
         except Exception as exc:  # noqa: BLE001
+            if use_sudo:
+                self._remote_run(f"rm -rf {shlex.quote(staging)}")
             self._ui(lambda: self.progress.config(value=0))
             self._error("Upload error", exc)
             return
@@ -1164,8 +1198,7 @@ class AwsTelegramManager:
 
     def _task_save_env(self, path: str, content: str) -> None:
         try:
-            with self.sftp_client.open(path, "w") as fh:
-                fh.write(content.encode("utf-8"))
+            self._remote_write_file(path, content)
         except Exception as exc:  # noqa: BLE001
             self._error("Save .env error", exc)
             return
@@ -1492,6 +1525,38 @@ class AwsTelegramManager:
     @staticmethod
     def _join(base: str, name: str) -> str:
         return base + name if base.endswith("/") else base + "/" + name
+
+    # ----- Remote shell helpers (for sudo file operations) ----------- #
+    def _use_sudo(self) -> bool:
+        return bool(getattr(self, "sudo_var", None) and self.sudo_var.get())
+
+    def _remote_run(self, cmd: str, timeout: int = 120):
+        """Run a shell command; return (exit_code, stdout, stderr)."""
+        _i, out_s, err_s = self.ssh_client.exec_command(cmd, timeout=timeout)
+        out = out_s.read().decode("utf-8", errors="replace")
+        err = err_s.read().decode("utf-8", errors="replace")
+        rc = out_s.channel.recv_exit_status()
+        return rc, out, err
+
+    def _remote_run_checked(self, cmd: str, timeout: int = 120) -> None:
+        rc, _out, err = self._remote_run(cmd, timeout)
+        if rc != 0:
+            raise IOError(err.strip() or f"Command failed (exit {rc}): {cmd}")
+
+    def _remote_write_file(self, path: str, content: str) -> None:
+        """Write a file remotely, using 'sudo tee' when sudo mode is on."""
+        if self._use_sudo():
+            cmd = f"sudo -n tee {shlex.quote(path)} > /dev/null"
+            stdin, stdout, stderr = self.ssh_client.exec_command(cmd, timeout=120)
+            stdin.write(content.encode("utf-8"))
+            stdin.channel.shutdown_write()
+            err = stderr.read().decode("utf-8", errors="replace")
+            rc = stdout.channel.recv_exit_status()
+            if rc != 0:
+                raise IOError(err.strip() or "sudo tee failed (passwordless sudo required)")
+        else:
+            with self.sftp_client.open(path, "w") as fh:
+                fh.write(content.encode("utf-8"))
 
     def _on_close(self) -> None:
         if not self._confirm_discard():
