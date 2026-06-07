@@ -67,9 +67,12 @@ _HOME = os.path.expanduser("~")
 PROFILE_FILE = os.path.join(_HOME, ".aws_gpu_manager_profiles.json")
 SETTINGS_FILE = os.path.join(_HOME, ".aws_gpu_manager_settings.json")
 
+# ASCII-only on purpose: katakana looks great but renders as empty boxes
+# ("tofu") on systems whose UI font lacks Japanese glyphs (e.g. Segoe UI on
+# Windows). These characters render in every font, so the rain always shows.
 MATRIX_CHARS = ("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                "アイウエオカキクケコサシスセソタチツテト"
-                "ナニヌネノハヒフヘホ$#%&@*+=<>")
+                "abcdefghijklmnopqrstuvwxyz"
+                "!<>[]{}()/\\|=+*#$%&@?;:.~^")
 
 # Theme palettes (RGBA 0-255). "matrix" is the default hacker look.
 PALETTES = {
