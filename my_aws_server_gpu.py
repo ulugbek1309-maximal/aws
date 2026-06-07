@@ -506,21 +506,25 @@ class GpuApp:
         # Files larger than this are not loaded into the editor widget, because
         # the immediate-mode text box re-measures the whole buffer every frame
         # and would stutter/lock up on huge or very-long-line files.
-        # Normal source files (even thousands of lines) stay fully editable.
-        # Only genuinely huge files (logs, dumps) open in the read-only paged
-        # viewer to avoid the per-frame cost of a giant editable text buffer.
-        self.MAX_EDIT_CHARS = 500_000
+        # Normal source files stay fully editable. Bigger files open in the
+        # read-only paged viewer to avoid the per-frame cost of a giant
+        # editable input_text (ImGui reprocesses its whole buffer every frame,
+        # which is what froze the UI on large files).
+        self.MAX_EDIT_CHARS = 120_000
         self._editor_readonly = False
-        # Paged read-only viewer for large files: only ONE small page is ever
-        # placed in a lightweight add_text item (NOT input_text, which ImGui
-        # re-processes every frame and was the real cause of the freeze).
-        self.PAGE_LINES = 200        # lines shown per page
-        self.VIEW_LINE_CAP = 300     # truncate very long lines for display
+        # Paged read-only viewer. A page is rendered INCREMENTALLY a few lines
+        # per frame (chunked), so even a huge page never blocks a single frame.
+        self.PAGE_LINES = 1500       # lines shown per page
+        self.VIEW_LINE_CAP = 500     # truncate very long lines for display
+        self.CHUNK_LINES = 120       # lines appended to the viewer per frame
         self._view_lines: list[str] = []
         self._view_text = ""         # full text, kept so "Edit anyway" can load it
         self._view_path = ""
         self._page = 0
         self._viewer_on = False
+        # Incremental render state for the current page.
+        self._pending_rows: list[str] = []   # rows still to be drawn
+        self._pending_buf: list[str] = []     # rows already drawn (accumulator)
         # Captured here (on the main thread, where GpuApp is constructed) so
         # worker threads can detect when they must marshal UI calls through the
         # queue instead of touching dpg directly.
@@ -867,12 +871,22 @@ class GpuApp:
         """Force-load the currently viewed large file into the editable box."""
         if not self._viewer_on or not self._view_text:
             return
+        # Editing is backed by input_text, which ImGui reprocesses every frame;
+        # above this hard cap it would freeze, so refuse and keep the viewer.
+        HARD_EDIT_CAP = 400_000
+        if len(self._view_text) > HARD_EDIT_CAP:
+            self._status(
+                f"Too large to edit safely ({len(self._view_text):,} chars). "
+                f"Use the Terminal (nano/sed) for files over {HARD_EDIT_CAP:,}.",
+                ok=False)
+            return
         text, path = self._view_text, self._view_path
 
         def apply():
             self.active_file = path
             self._editor_readonly = False
             self._viewer_on = False
+            self._pending_rows = []
             dpg.configure_item("viewer_group", show=False)
             dpg.configure_item("editor", show=True, readonly=False)
             dpg.set_value("editor", text)
@@ -898,9 +912,31 @@ class GpuApp:
             if len(ln) > cap:
                 ln = ln[:cap] + " >> (truncated)"
             rows.append(f"{i + 1:>8}  {ln}")
-        dpg.set_value("viewer_text", "\n".join(rows))
+        # Render the page INCREMENTALLY: queue the rows and let _viewer_tick()
+        # append a small chunk each frame so a big page never blocks the UI.
+        self._pending_rows = rows
+        self._pending_buf = []
+        dpg.set_value("viewer_text", "")
         dpg.set_value("viewer_info",
-                      f"lines {start + 1:,}-{end:,} of {total:,}  (page {self._page + 1}/{npages})")
+                      f"lines {start + 1:,}-{end:,} of {total:,}  (page {self._page + 1}/{npages})  loading...")
+        self._page_meta = (start, end, total, npages)
+
+    def _viewer_tick(self) -> None:
+        """Append one chunk of the pending page per frame (keeps UI smooth)."""
+        if not self._pending_rows:
+            return
+        chunk = self._pending_rows[:self.CHUNK_LINES]
+        del self._pending_rows[:self.CHUNK_LINES]
+        self._pending_buf.extend(chunk)
+        try:
+            dpg.set_value("viewer_text", "\n".join(self._pending_buf))
+        except Exception:  # noqa: BLE001
+            return
+        if not self._pending_rows:
+            # Finished this page: drop the "loading..." suffix.
+            start, end, total, npages = getattr(self, "_page_meta", (0, 0, 0, 1))
+            dpg.set_value("viewer_info",
+                          f"lines {start + 1:,}-{end:,} of {total:,}  (page {self._page + 1}/{npages})")
 
     def on_page(self, delta: int, absolute: bool = False) -> None:
         if not self._viewer_on:
@@ -1723,6 +1759,7 @@ class GpuApp:
             try:
                 self._drain_ui()
                 self._rain_frame()
+                self._viewer_tick()
                 frame += 1
                 if frame % 240 == 0:  # ~ every few seconds
                     self._watchdog()
