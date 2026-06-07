@@ -502,15 +502,16 @@ class GpuApp:
         # Files larger than this are not loaded into the editor widget, because
         # the immediate-mode text box re-measures the whole buffer every frame
         # and would stutter/lock up on huge or very-long-line files.
-        self.MAX_EDIT_CHARS = 200_000
+        self.MAX_EDIT_CHARS = 100_000
         self._editor_readonly = False
-        # Virtualized viewer state (VS Code style: only visible lines drawn).
-        self.LINE_H = 16            # pixels per line in the viewer
-        self.VIEW_H = 320           # viewer child-window height in pixels
-        self.MAX_DRAW_LINE = 1000   # truncate very long lines when drawing
+        # Paged read-only viewer for large files: only ONE small page is ever
+        # placed in the widget, so the GPU/UI never stalls and no per-frame work
+        # is needed (the previous full-virtualization drawlist was the freeze).
+        self.PAGE_LINES = 250        # lines shown per page
+        self.VIEW_LINE_CAP = 400     # truncate very long lines for display
         self._view_lines: list[str] = []
+        self._page = 0
         self._viewer_on = False
-        self._last_scroll = -1.0
         # Captured here (on the main thread, where GpuApp is constructed) so
         # worker threads can detect when they must marshal UI calls through the
         # queue instead of touching dpg directly.
@@ -831,77 +832,60 @@ class GpuApp:
 
         self._ui(apply)
 
-    # ----- virtualized large-file viewer (VS Code style) ------------- #
+    # ----- paged large-file viewer ----------------------------------- #
     def _open_in_viewer(self, text: str, path: str) -> None:
-        lines = text.split("\n")
-        n = len(text)
-        longest = 0
-        for ln in lines:
-            if len(ln) > longest:
-                longest = len(ln)
-                if longest >= self.MAX_DRAW_LINE:
-                    break
-        longest = min(longest, self.MAX_DRAW_LINE)
-        width = max(1200, (longest + 14) * 8)
-        height = max(self.VIEW_H, len(lines) * self.LINE_H + 20)
+        lines = text.split("\n")  # done on the worker thread (cheap, no UI)
 
         def apply():
             self.active_file = None          # read-only: Save stays blocked
             self._editor_readonly = True
             self._view_lines = lines
+            self._page = 0
             self._viewer_on = True
-            self._last_scroll = -1.0
             dpg.configure_item("editor", show=False)
             dpg.configure_item("viewer_group", show=True)
-            dpg.configure_item("viewer_canvas", width=int(width), height=int(height))
-            try:
-                dpg.set_y_scroll("viewer_area", 0.0)
-            except Exception:  # noqa: BLE001
-                pass
-            dpg.set_value("editor_label",
-                          f"VIEW (read-only, virtualized) - {path}")
-            dpg.set_value("viewer_info", f"{len(lines):,} lines | {n:,} chars")
-            self._render_viewport(force=True)
-            self._status(f"Large file opened in virtual viewer: {path}", ok=True)
+            dpg.set_value("editor_label", f"VIEW (read-only, paged) - {path}")
+            self._show_page()
+            self._status(f"Large file opened in paged viewer: {path}", ok=True)
 
         self._ui(apply)
 
-    def _render_viewport(self, force: bool = False) -> None:
-        """Draw only the currently visible lines (runs on the main thread)."""
-        if not self._viewer_on or not self._view_lines:
-            return
-        try:
-            y = dpg.get_y_scroll("viewer_area")
-        except Exception:  # noqa: BLE001
-            y = 0.0
-        if not force and abs(y - self._last_scroll) < 1.0:
-            return
-        self._last_scroll = y
+    def _npages(self) -> int:
         total = len(self._view_lines)
-        first = max(0, int(y // self.LINE_H) - 2)
-        visible = int(self.VIEW_H // self.LINE_H) + 6
-        last = min(total, first + visible)
-        col = PALETTES[self.theme_name]["text"]
-        try:
-            dpg.delete_item("viewer_canvas", children_only=True)
-            for i in range(first, last):
-                line = self._view_lines[i]
-                if len(line) > self.MAX_DRAW_LINE:
-                    line = line[:self.MAX_DRAW_LINE] + "  >> (line truncated)"
-                dpg.draw_text((4, i * self.LINE_H), f"{i + 1:>7}  {line}",
-                              color=col, size=14, parent="viewer_canvas")
-        except Exception:  # noqa: BLE001
-            pass
+        return max(1, (total + self.PAGE_LINES - 1) // self.PAGE_LINES)
+
+    def _show_page(self) -> None:
+        total = len(self._view_lines)
+        npages = self._npages()
+        self._page = max(0, min(self._page, npages - 1))
+        start = self._page * self.PAGE_LINES
+        end = min(total, start + self.PAGE_LINES)
+        cap = self.VIEW_LINE_CAP
+        rows = []
+        for i in range(start, end):
+            ln = self._view_lines[i]
+            if len(ln) > cap:
+                ln = ln[:cap] + " >> (truncated)"
+            rows.append(f"{i + 1:>8}  {ln}")
+        dpg.set_value("viewer_text", "\n".join(rows))
+        dpg.set_value("viewer_info",
+                      f"lines {start + 1:,}-{end:,} of {total:,}  (page {self._page + 1}/{npages})")
+
+    def on_page(self, delta: int, absolute: bool = False) -> None:
+        if not self._viewer_on:
+            return
+        if absolute:
+            self._page = 0 if delta <= 0 else self._npages() - 1
+        else:
+            self._page += delta
+        self._show_page()
 
     def on_goto_line(self) -> None:
         if not self._viewer_on or not self._view_lines:
             return
         ln = max(1, min(len(self._view_lines), int(dpg.get_value("viewer_goto"))))
-        try:
-            dpg.set_y_scroll("viewer_area", (ln - 1) * self.LINE_H)
-        except Exception:  # noqa: BLE001
-            pass
-        self._render_viewport(force=True)
+        self._page = (ln - 1) // self.PAGE_LINES
+        self._show_page()
 
     def on_save(self) -> None:
         if not self._require():
@@ -1505,15 +1489,17 @@ class GpuApp:
                     dpg.add_input_text(tag="editor", multiline=True, width=-1, height=345)
                     with dpg.group(tag="viewer_group", show=False):
                         with dpg.group(horizontal=True):
+                            dpg.add_button(label="|<", callback=lambda: self.on_page(0, absolute=True))
+                            dpg.add_button(label="< Prev", callback=lambda: self.on_page(-1))
+                            dpg.add_button(label="Next >", callback=lambda: self.on_page(1))
+                            dpg.add_button(label=">|", callback=lambda: self.on_page(1, absolute=True))
                             dpg.add_text("", tag="viewer_info")
-                            dpg.add_text("   Go to line:")
-                            dpg.add_input_int(tag="viewer_goto", width=120,
+                            dpg.add_text("  line:")
+                            dpg.add_input_int(tag="viewer_goto", width=110,
                                               default_value=1, min_value=1, min_clamped=True)
                             dpg.add_button(label="Go", callback=lambda: self.on_goto_line())
-                        with dpg.child_window(tag="viewer_area", width=-1, height=self.VIEW_H,
-                                              horizontal_scrollbar=True):
-                            with dpg.drawlist(width=2000, height=self.VIEW_H, tag="viewer_canvas"):
-                                pass
+                        dpg.add_input_text(tag="viewer_text", multiline=True, readonly=True,
+                                           width=-1, height=320)
 
     def _build_env_tab(self) -> None:
         with dpg.tab(label="[*] .env Editor"):
@@ -1632,7 +1618,6 @@ class GpuApp:
             try:
                 self._drain_ui()
                 self._rain_frame()
-                self._render_viewport()
                 frame += 1
                 if frame % 240 == 0:  # ~ every few seconds
                     self._watchdog()
