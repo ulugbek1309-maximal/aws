@@ -504,6 +504,13 @@ class GpuApp:
         # and would stutter/lock up on huge or very-long-line files.
         self.MAX_EDIT_CHARS = 200_000
         self._editor_readonly = False
+        # Virtualized viewer state (VS Code style: only visible lines drawn).
+        self.LINE_H = 16            # pixels per line in the viewer
+        self.VIEW_H = 320           # viewer child-window height in pixels
+        self.MAX_DRAW_LINE = 1000   # truncate very long lines when drawing
+        self._view_lines: list[str] = []
+        self._viewer_on = False
+        self._last_scroll = -1.0
         # Captured here (on the main thread, where GpuApp is constructed) so
         # worker threads can detect when they must marshal UI calls through the
         # queue instead of touching dpg directly.
@@ -807,35 +814,94 @@ class GpuApp:
             return
         n = len(text)
         if n > self.MAX_EDIT_CHARS:
-            # Too big to edit on the GPU: show a read-only, truncated preview
-            # instead of freezing. active_file stays None so Save is blocked.
-            preview = text[:self.MAX_EDIT_CHARS]
-
-            def apply_ro():
-                self.active_file = None
-                self._editor_readonly = True
-                dpg.configure_item("editor", readonly=True)
-                dpg.set_value("editor", preview)
-                dpg.set_value(
-                    "editor_label",
-                    f"READ-ONLY preview - first {self.MAX_EDIT_CHARS:,} of {n:,} "
-                    f"chars - {path}")
-                self._status(
-                    f"Large file ({n:,} chars) opened read-only. "
-                    f"Edit it via the Terminal (nano/sed) instead.", ok=True)
-
-            self._ui(apply_ro)
+            # Too big to edit on the GPU: open it in the virtualized viewer
+            # (only the visible lines are drawn) instead of freezing.
+            self._open_in_viewer(text, path)
             return
 
         def apply():
             self.active_file = path
             self._editor_readonly = False
-            dpg.configure_item("editor", readonly=False)
+            self._viewer_on = False
+            dpg.configure_item("viewer_group", show=False)
+            dpg.configure_item("editor", show=True, readonly=False)
             dpg.set_value("editor", text)
             dpg.set_value("editor_label", f"Editing: {path}")
             self._status(f"Opened: {path}", ok=True)
 
         self._ui(apply)
+
+    # ----- virtualized large-file viewer (VS Code style) ------------- #
+    def _open_in_viewer(self, text: str, path: str) -> None:
+        lines = text.split("\n")
+        n = len(text)
+        longest = 0
+        for ln in lines:
+            if len(ln) > longest:
+                longest = len(ln)
+                if longest >= self.MAX_DRAW_LINE:
+                    break
+        longest = min(longest, self.MAX_DRAW_LINE)
+        width = max(1200, (longest + 14) * 8)
+        height = max(self.VIEW_H, len(lines) * self.LINE_H + 20)
+
+        def apply():
+            self.active_file = None          # read-only: Save stays blocked
+            self._editor_readonly = True
+            self._view_lines = lines
+            self._viewer_on = True
+            self._last_scroll = -1.0
+            dpg.configure_item("editor", show=False)
+            dpg.configure_item("viewer_group", show=True)
+            dpg.configure_item("viewer_canvas", width=int(width), height=int(height))
+            try:
+                dpg.set_y_scroll("viewer_area", 0.0)
+            except Exception:  # noqa: BLE001
+                pass
+            dpg.set_value("editor_label",
+                          f"VIEW (read-only, virtualized) - {path}")
+            dpg.set_value("viewer_info", f"{len(lines):,} lines | {n:,} chars")
+            self._render_viewport(force=True)
+            self._status(f"Large file opened in virtual viewer: {path}", ok=True)
+
+        self._ui(apply)
+
+    def _render_viewport(self, force: bool = False) -> None:
+        """Draw only the currently visible lines (runs on the main thread)."""
+        if not self._viewer_on or not self._view_lines:
+            return
+        try:
+            y = dpg.get_y_scroll("viewer_area")
+        except Exception:  # noqa: BLE001
+            y = 0.0
+        if not force and abs(y - self._last_scroll) < 1.0:
+            return
+        self._last_scroll = y
+        total = len(self._view_lines)
+        first = max(0, int(y // self.LINE_H) - 2)
+        visible = int(self.VIEW_H // self.LINE_H) + 6
+        last = min(total, first + visible)
+        col = PALETTES[self.theme_name]["text"]
+        try:
+            dpg.delete_item("viewer_canvas", children_only=True)
+            for i in range(first, last):
+                line = self._view_lines[i]
+                if len(line) > self.MAX_DRAW_LINE:
+                    line = line[:self.MAX_DRAW_LINE] + "  >> (line truncated)"
+                dpg.draw_text((4, i * self.LINE_H), f"{i + 1:>7}  {line}",
+                              color=col, size=14, parent="viewer_canvas")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def on_goto_line(self) -> None:
+        if not self._viewer_on or not self._view_lines:
+            return
+        ln = max(1, min(len(self._view_lines), int(dpg.get_value("viewer_goto"))))
+        try:
+            dpg.set_y_scroll("viewer_area", (ln - 1) * self.LINE_H)
+        except Exception:  # noqa: BLE001
+            pass
+        self._render_viewport(force=True)
 
     def on_save(self) -> None:
         if not self._require():
@@ -1437,6 +1503,17 @@ class GpuApp:
                 with dpg.child_window(width=-1, height=380):
                     dpg.add_text("No file open", tag="editor_label")
                     dpg.add_input_text(tag="editor", multiline=True, width=-1, height=345)
+                    with dpg.group(tag="viewer_group", show=False):
+                        with dpg.group(horizontal=True):
+                            dpg.add_text("", tag="viewer_info")
+                            dpg.add_text("   Go to line:")
+                            dpg.add_input_int(tag="viewer_goto", width=120,
+                                              default_value=1, min_value=1, min_clamped=True)
+                            dpg.add_button(label="Go", callback=lambda: self.on_goto_line())
+                        with dpg.child_window(tag="viewer_area", width=-1, height=self.VIEW_H,
+                                              horizontal_scrollbar=True):
+                            with dpg.drawlist(width=2000, height=self.VIEW_H, tag="viewer_canvas"):
+                                pass
 
     def _build_env_tab(self) -> None:
         with dpg.tab(label="[*] .env Editor"):
@@ -1555,6 +1632,7 @@ class GpuApp:
             try:
                 self._drain_ui()
                 self._rain_frame()
+                self._render_viewport()
                 frame += 1
                 if frame % 240 == 0:  # ~ every few seconds
                     self._watchdog()
