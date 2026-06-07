@@ -1615,8 +1615,70 @@ class GpuApp:
                     dpg.add_input_text(tag="tasks_console", multiline=True, width=-1,
                                        height=200, readonly=True)
 
+    def _setup_fonts(self) -> None:
+        """Load a wide-Unicode font so emojis / cyrillic / CJK don't show as '?'.
+
+        Dear PyGui's built-in font only covers basic ASCII, so any other glyph
+        renders as a missing-character box / '?'. We pick the first available
+        broad-coverage .ttf/.ttc on this machine, enable the full glyph range,
+        and (if present) merge a color-emoji font on top of it.
+        """
+        text_candidates = [
+            # Windows
+            "C:/Windows/Fonts/segoeui.ttf",
+            "C:/Windows/Fonts/arialuni.ttf",
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/YuGothM.ttc",
+            # macOS
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/Library/Fonts/Arial Unicode.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "/System/Library/Fonts/PingFang.ttc",
+            # Linux (common Noto / DejaVu coverage)
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+            "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+        ]
+        emoji_candidates = [
+            "C:/Windows/Fonts/seguiemj.ttf",                       # Windows color emoji
+            "/System/Library/Fonts/Apple Color Emoji.ttc",         # macOS color emoji
+            "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",   # Linux
+            "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+            "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf",
+        ]
+        text_path = next((p for p in text_candidates if os.path.isfile(p)), None)
+        if not text_path:
+            # No broad font found: keep the default (ASCII still fine).
+            return
+        try:
+            with dpg.font_registry():
+                with dpg.font(text_path, 16) as main_font:
+                    # Broad coverage so non-ASCII characters render instead of '?'.
+                    dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
+                    for hint in ("Cyrillic", "Japanese", "Chinese_Full",
+                                 "Korean", "Vietnamese", "Thai"):
+                        h = getattr(dpg, f"mvFontRangeHint_{hint}", None)
+                        if h is not None:
+                            dpg.add_font_range_hint(h)
+                    # Cover common symbol / arrow / box-drawing / emoji blocks.
+                    dpg.add_font_range(0x2190, 0x2BFF)   # arrows, symbols, misc
+                    dpg.add_font_range(0x1F300, 0x1FAFF)  # emoji & pictographs
+                    emoji_path = next((p for p in emoji_candidates if os.path.isfile(p)), None)
+                    if emoji_path:
+                        try:
+                            dpg.add_font(emoji_path, 16)
+                        except Exception:  # noqa: BLE001
+                            pass
+            dpg.bind_font(main_font)
+        except Exception:  # noqa: BLE001
+            # Any font loading issue must never crash the app.
+            pass
+
     def build(self) -> None:
         dpg.create_context()
+        self._setup_fonts()
         for nm, pal in PALETTES.items():
             self._themes[nm] = self._build_theme(pal)
         self._build_dialogs()
