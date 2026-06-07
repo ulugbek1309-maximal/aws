@@ -35,6 +35,7 @@ import time
 import shlex
 import queue
 import random
+import warnings
 import threading
 import datetime
 
@@ -1655,16 +1656,26 @@ class GpuApp:
         try:
             with dpg.font_registry():
                 with dpg.font(text_path, 16) as main_font:
-                    # Broad coverage so non-ASCII characters render instead of '?'.
-                    dpg.add_font_range_hint(dpg.mvFontRangeHint_Default)
-                    for hint in ("Cyrillic", "Japanese", "Chinese_Full",
-                                 "Korean", "Vietnamese", "Thai"):
-                        h = getattr(dpg, f"mvFontRangeHint_{hint}", None)
-                        if h is not None:
-                            dpg.add_font_range_hint(h)
-                    # Cover common symbol / arrow / box-drawing / emoji blocks.
-                    dpg.add_font_range(0x2190, 0x2BFF)   # arrows, symbols, misc
-                    dpg.add_font_range(0x1F300, 0x1FAFF)  # emoji & pictographs
+                    # Newer Dear PyGui versions build glyph ranges automatically
+                    # and mark these calls as deprecated no-ops; older versions
+                    # still need them for non-ASCII coverage. Call them only if
+                    # available and silence the deprecation noise either way.
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", DeprecationWarning)
+                        hint_fn = getattr(dpg, "add_font_range_hint", None)
+                        range_fn = getattr(dpg, "add_font_range", None)
+                        if callable(hint_fn):
+                            default_hint = getattr(dpg, "mvFontRangeHint_Default", None)
+                            if default_hint is not None:
+                                hint_fn(default_hint)
+                            for hint in ("Cyrillic", "Japanese", "Chinese_Full",
+                                         "Korean", "Vietnamese", "Thai"):
+                                h = getattr(dpg, f"mvFontRangeHint_{hint}", None)
+                                if h is not None:
+                                    hint_fn(h)
+                        if callable(range_fn):
+                            range_fn(0x2190, 0x2BFF)    # arrows, symbols, misc
+                            range_fn(0x1F300, 0x1FAFF)  # emoji & pictographs
                     emoji_path = next((p for p in emoji_candidates if os.path.isfile(p)), None)
                     if emoji_path:
                         try:
