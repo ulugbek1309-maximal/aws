@@ -959,23 +959,33 @@ class QtApp(QMainWindow):
         self.upload_target.setText(data.get("upload_target", HINT_UPLOAD_TARGET))
 
     def on_profile_save(self) -> None:
-        default = self.profile_combo.currentText() or self.in_host.text()
-        name, ok = QInputDialog.getText(self, "Save Profile", "Profile name:", text=default)
-        if not ok or not name.strip():
-            return
-        name = name.strip()
-        profiles = _read_json(PROFILE_FILE)
-        profiles[name] = {
+        # Read every field FIRST, before opening the modal dialog, so the
+        # saved record always reflects what is currently in the form (the
+        # dialog stealing focus must not affect the captured values).
+        record = {
             "host": self.in_host.text().strip(),
             "port": self.in_port.text().strip() or HINT_PORT,
             "user": self.in_user.text().strip() or HINT_USERNAME,
             "key": self.in_key.text().strip(),
             "upload_target": self.upload_target.text().strip(),
         }
+        default = self.profile_combo.currentText() or record["host"]
+        name, ok = QInputDialog.getText(self, "Save Profile", "Profile name:", text=default)
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        profiles = _read_json(PROFILE_FILE)
+        profiles[name] = record
         _write_json(PROFILE_FILE, profiles)
+        # Refresh the dropdown and select the saved name WITHOUT triggering
+        # on_profile_selected (which would reload and could clear the form).
+        self.profile_combo.blockSignals(True)
         self._refresh_profiles()
         self.profile_combo.setCurrentText(name)
-        self._status(f"Profile '{name}' saved", ok=True)
+        self.profile_combo.blockSignals(False)
+        self._status(
+            f"Saved '{name}'  (host={record['host'] or '-'}, port={record['port']}, "
+            f"user={record['user']}, key={'yes' if record['key'] else '-'})", ok=True)
 
     def on_profile_delete(self) -> None:
         name = self.profile_combo.currentText()
