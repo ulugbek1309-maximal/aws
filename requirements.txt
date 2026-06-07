@@ -1,3 +1,13 @@
 paramiko>=3.4.0
 # Optional: enables editor syntax highlighting (the app runs fine without it).
 pygments>=2.17.0
+
+
+# GPU edition only (my_aws_server_gpu.py): GPU-accelerated GUI renderer.
+# Not needed for the Tkinter build (my_aws_server.py).
+dearpygui>=1.11.0
+
+
+# Qt edition only (my_aws_server_qt.py): native OS text engine = real color
+# emoji and full Unicode. Not needed for the Tkinter or GPU builds.
+PySide6>=6.6.0
