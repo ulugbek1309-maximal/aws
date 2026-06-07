@@ -511,6 +511,14 @@ class QtApp(QMainWindow):
         self._cmd_index = 0
         self._threads: list[tuple[QThread, Worker]] = []
 
+        # Chunked loading: very large files are inserted into the editor a
+        # block at a time via a timer, so the UI never freezes on open.
+        self.CHUNK_CHARS = 200_000   # characters appended per timer tick
+        self._load_chunks: list[str] = []
+        self._load_timer = QTimer(self)
+        self._load_timer.setInterval(0)  # fire as fast as the event loop allows
+        self._load_timer.timeout.connect(self._load_next_chunk)
+
         self.settings = _read_json(SETTINGS_FILE)
         self.theme_name = self.settings.get("theme", "matrix")
 
@@ -1079,10 +1087,55 @@ class QtApp(QMainWindow):
             self._bg(self.ssh.read_file, path, on_done=lambda text: self._opened(path, text))
 
     def _opened(self, path: str, text: str) -> None:
+        self._load_timer.stop()          # cancel any in-progress chunked load
+        self._load_chunks = []
         self.active_file = path
-        self.editor.setPlainText(text)
         self.editor_label.setText(f"Editing: {path}")
-        self._status(f"Opened: {path}", ok=True)
+        # Small files: set in one go. Large files: stream into the editor in
+        # chunks via a timer so the UI thread never blocks on a huge insert.
+        if len(text) <= self.CHUNK_CHARS:
+            self.editor.setPlainText(text)
+            self._status(f"Opened: {path}", ok=True)
+            return
+        self._load_timer.stop()
+        self.editor.setReadOnly(True)
+        self.editor.clear()
+        # Split into chunks on line boundaries where possible.
+        self._load_chunks = self._chunk_text(text, self.CHUNK_CHARS)
+        self._load_total = len(self._load_chunks)
+        self.editor_label.setText(f"Loading {path} ...")
+        self._status(f"Loading large file ({len(text):,} chars)...", ok=True)
+        self._load_timer.start()
+
+    @staticmethod
+    def _chunk_text(text: str, size: int) -> list[str]:
+        chunks, n, i = [], len(text), 0
+        while i < n:
+            end = min(n, i + size)
+            # Prefer to break at a newline so lines aren't split mid-way.
+            nl = text.rfind("\n", i, end)
+            if nl > i and end < n:
+                end = nl + 1
+            chunks.append(text[i:end])
+            i = end
+        return chunks
+
+    def _load_next_chunk(self) -> None:
+        if not self._load_chunks:
+            self._load_timer.stop()
+            self.editor.setReadOnly(False)
+            self.editor.moveCursor(self.editor.textCursor().Start)
+            self.editor.ensureCursorVisible()
+            self.editor_label.setText(f"Editing: {self.active_file}")
+            self._status(f"Opened: {self.active_file}", ok=True)
+            return
+        chunk = self._load_chunks.pop(0)
+        cursor = self.editor.textCursor()
+        cursor.movePosition(cursor.End)
+        cursor.insertText(chunk)
+        done = self._load_total - len(self._load_chunks)
+        self.editor_label.setText(
+            f"Loading {self.active_file} ...  ({done}/{self._load_total})")
 
     def on_save(self) -> None:
         if not self._require():
