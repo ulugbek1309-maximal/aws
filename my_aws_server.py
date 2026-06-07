@@ -1847,17 +1847,26 @@ class AwsTelegramManager:
         except Exception:
             pass
 
+    # Above these limits the per-token tag_add loop would block the UI thread
+    # (Tkinter is slow with huge buffers / very long lines), so highlighting is
+    # skipped and the file still opens instantly as plain text.
+    HL_MAX_CHARS = 150_000
+    HL_MAX_LINE = 4_000
+
     def _highlight_editor(self) -> None:
         if not HAS_PYGMENTS or not self.active_file:
             return
         try:
             for tag in TOKEN_COLORS[self.theme_name]:
                 self.editor.tag_remove(tag, "1.0", tk.END)
+            content = self.editor.get("1.0", "end-1c")
+            # Performance guard: bail out for large files or very long lines.
+            if len(content) > self.HL_MAX_CHARS or self._has_long_line(content):
+                return
             try:
                 lexer = get_lexer_for_filename(self.active_file)
             except Exception:  # noqa: BLE001
                 lexer = TextLexer()
-            content = self.editor.get("1.0", "end-1c")
             self.editor.mark_set("rs", "1.0")
             for tok, value in lex(content, lexer):
                 tag = self._token_to_tag(tok)
@@ -1867,6 +1876,16 @@ class AwsTelegramManager:
                 self.editor.mark_set("rs", "re")
         except Exception:  # noqa: BLE001 - highlighting must never block opening
             pass
+
+    @staticmethod
+    def _has_long_line(content: str, limit: int = HL_MAX_LINE) -> bool:
+        longest = 0
+        for ln in content.splitlines():
+            if len(ln) > longest:
+                longest = len(ln)
+                if longest > limit:
+                    return True
+        return False
 
     @staticmethod
     def _token_to_tag(tok) -> str | None:
