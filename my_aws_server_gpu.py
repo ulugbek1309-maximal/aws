@@ -502,13 +502,13 @@ class GpuApp:
         # Files larger than this are not loaded into the editor widget, because
         # the immediate-mode text box re-measures the whole buffer every frame
         # and would stutter/lock up on huge or very-long-line files.
-        self.MAX_EDIT_CHARS = 100_000
+        self.MAX_EDIT_CHARS = 40_000
         self._editor_readonly = False
         # Paged read-only viewer for large files: only ONE small page is ever
-        # placed in the widget, so the GPU/UI never stalls and no per-frame work
-        # is needed (the previous full-virtualization drawlist was the freeze).
-        self.PAGE_LINES = 250        # lines shown per page
-        self.VIEW_LINE_CAP = 400     # truncate very long lines for display
+        # placed in a lightweight add_text item (NOT input_text, which ImGui
+        # re-processes every frame and was the real cause of the freeze).
+        self.PAGE_LINES = 200        # lines shown per page
+        self.VIEW_LINE_CAP = 300     # truncate very long lines for display
         self._view_lines: list[str] = []
         self._page = 0
         self._viewer_on = False
@@ -1498,8 +1498,9 @@ class GpuApp:
                             dpg.add_input_int(tag="viewer_goto", width=110,
                                               default_value=1, min_value=1, min_clamped=True)
                             dpg.add_button(label="Go", callback=lambda: self.on_goto_line())
-                        dpg.add_input_text(tag="viewer_text", multiline=True, readonly=True,
-                                           width=-1, height=320)
+                        with dpg.child_window(tag="viewer_area", width=-1, height=320,
+                                              horizontal_scrollbar=True):
+                            dpg.add_text("", tag="viewer_text")
 
     def _build_env_tab(self) -> None:
         with dpg.tab(label="[*] .env Editor"):
