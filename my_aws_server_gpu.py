@@ -502,7 +502,10 @@ class GpuApp:
         # Files larger than this are not loaded into the editor widget, because
         # the immediate-mode text box re-measures the whole buffer every frame
         # and would stutter/lock up on huge or very-long-line files.
-        self.MAX_EDIT_CHARS = 40_000
+        # Normal source files (even thousands of lines) stay fully editable.
+        # Only genuinely huge files (logs, dumps) open in the read-only paged
+        # viewer to avoid the per-frame cost of a giant editable text buffer.
+        self.MAX_EDIT_CHARS = 500_000
         self._editor_readonly = False
         # Paged read-only viewer for large files: only ONE small page is ever
         # placed in a lightweight add_text item (NOT input_text, which ImGui
@@ -510,6 +513,8 @@ class GpuApp:
         self.PAGE_LINES = 200        # lines shown per page
         self.VIEW_LINE_CAP = 300     # truncate very long lines for display
         self._view_lines: list[str] = []
+        self._view_text = ""         # full text, kept so "Edit anyway" can load it
+        self._view_path = ""
         self._page = 0
         self._viewer_on = False
         # Captured here (on the main thread, where GpuApp is constructed) so
@@ -840,13 +845,35 @@ class GpuApp:
             self.active_file = None          # read-only: Save stays blocked
             self._editor_readonly = True
             self._view_lines = lines
+            self._view_text = text           # kept so "Edit anyway" can load it
+            self._view_path = path
             self._page = 0
             self._viewer_on = True
             dpg.configure_item("editor", show=False)
             dpg.configure_item("viewer_group", show=True)
             dpg.set_value("editor_label", f"VIEW (read-only, paged) - {path}")
             self._show_page()
-            self._status(f"Large file opened in paged viewer: {path}", ok=True)
+            self._status(
+                f"Large file ({len(text):,} chars) opened read-only. "
+                f"Click 'Edit anyway' to load it into the editor.", ok=True)
+
+        self._ui(apply)
+
+    def on_edit_anyway(self) -> None:
+        """Force-load the currently viewed large file into the editable box."""
+        if not self._viewer_on or not self._view_text:
+            return
+        text, path = self._view_text, self._view_path
+
+        def apply():
+            self.active_file = path
+            self._editor_readonly = False
+            self._viewer_on = False
+            dpg.configure_item("viewer_group", show=False)
+            dpg.configure_item("editor", show=True, readonly=False)
+            dpg.set_value("editor", text)
+            dpg.set_value("editor_label", f"Editing (large): {path}")
+            self._status("Editing large file - may feel heavy while typing.", ok=True)
 
         self._ui(apply)
 
@@ -1498,6 +1525,7 @@ class GpuApp:
                             dpg.add_input_int(tag="viewer_goto", width=110,
                                               default_value=1, min_value=1, min_clamped=True)
                             dpg.add_button(label="Go", callback=lambda: self.on_goto_line())
+                            dpg.add_button(label="Edit anyway", callback=lambda: self.on_edit_anyway())
                         with dpg.child_window(tag="viewer_area", width=-1, height=320,
                                               horizontal_scrollbar=True):
                             dpg.add_text("", tag="viewer_text")
